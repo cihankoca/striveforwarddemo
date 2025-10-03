@@ -1,0 +1,625 @@
+{
+  "name": "2.Email Send & Status Update (Active)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "retool-email-send",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": false
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Webhook from Retool",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -832,
+        144
+      ],
+      "webhookId": "[redacted-uuid]",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 1) Webhook'tan gelen veriyi DOĞRU yerden al\nconst input = $input.first().json;\nconst d = input.body || input;  // body varsa onu al, yoksa direkt input'u kullan\n\n// Debug için loglayalım\nconsole.log(\"Input structure:\", Object.keys(input));\nconsole.log(\"Body content:\", d);\nconsole.log(\"Customer email raw:\", d.customer_email);\nconsole.log(\"Customer email type:\", typeof d.customer_email);\n\n// 2) Zorunlu alanlar\nconst required = ['customer_id', 'customer_email', 'email_subject', 'email_content', 'action_type'];\n\n// 3) Eksik alan kontrolü\nconst isMissing = (v) => v === undefined || v === null || (typeof v === 'string' && v.trim() === '');\nconst missing = required.filter(k => isMissing(d[k]));\n\nif (missing.length) {\n  throw new Error(`Missing required fields: ${missing.join(', ')}`);\n}\n\n// 4) Email'i temizle ve kontrol et\nconst cleanEmail = String(d.customer_email).trim();  // String'e çevir ve trim yap\nconsole.log(\"Clean email:\", cleanEmail);\n\nconst emailRegex = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/;\nif (!emailRegex.test(cleanEmail)) {\n  throw new Error(`Invalid email format: \"${cleanEmail}\" (length: ${cleanEmail.length})`);\n}\n\n// 5) HTML hazırlama ve imza ekleme\nlet html = d.email_content;\nif (!html.includes('<html>')) {\n  html = `<html>\n  <head>\n    <meta charset=\"UTF-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n  </head>\n  <body style=\"font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;\">\n    ${html.replace(/\\\\n/g, '<br>')}\n  </body>\n</html>`;\n}\n\n// İmza ekle (eğer yoksa)\nif (!/LE Glam Team/i.test(html)) {\n  const signature = `\n    <div style=\"margin-top: 30px; border-top: 1px solid #e0e0e0; padding-top: 20px; color: #666;\">\n      <p style=\"margin: 0;\">Best regards,</p>\n      <p style=\"margin: 5px 0;\"><strong>LE Glam Team</strong></p>\n      <p style=\"margin: 0; font-size: 12px;\">📧 redacted@redacted-handle.com</p>\n      <p style=\"margin: 0; font-size: 12px;\">📞 [redacted-phone]</p>\n    </div>`;\n  html = html.replace('</body>', signature + '</body>');\n}\n\n// 6) Unique ID oluştur\nfunction simpleHash(str) {\n  let hash = 0;\n  for (let i = 0; i < str.length; i++) {\n    const char = str.charCodeAt(i);\n    hash = ((hash << 5) - hash) + char;\n    hash = hash & hash;\n  }\n  return Math.abs(hash).toString(36);\n}\n\nlet client_message_id;\nif (d.action_type === 'send_initial') {\n  const today = new Date().toISOString().split('T')[0];\n  const uniqueKey = `initial-${d.customer_id}-${d.email_subject}-${today}`;\n  client_message_id = simpleHash(uniqueKey + d.email_content);\n} else {\n  const bucket = Math.floor(Date.now() / (5 * 60 * 1000));\n  const uniqueKey = `followup-${d.customer_id}-${bucket}`;\n  client_message_id = simpleHash(uniqueKey + d.email_content);\n}\n\nclient_message_id = `msg_${client_message_id}_${Date.now().toString(36)}`;\n\n// 7) Tüm veriyi hazırla ve döndür\nreturn [{\n  json: {\n    // Original data\n    org_id: d.org_id || 'le-glam-team',\n    customer_id: d.customer_id,\n    customer_name: d.customer_name || '',\n    customer_email: cleanEmail,  // Temizlenmiş email'i kullan\n    email_subject: d.email_subject,\n    email_content: d.email_content,\n    email_content_html: html,\n    action_type: d.action_type,\n    \n    // Status management\n    new_status: d.action_type === 'send_initial' \n      ? 'Email Sent - Awaiting Reply' \n      : d.new_status || 'Email Sent - Awaiting Reply',\n    client_message_id,\n    \n    // Event details\n    event_date: d.event_date || null,\n    ready_by_time: d.ready_by_time || null,\n    service_location: d.service_location || null,\n    number_of_hair: parseInt(d.number_of_hair) || 0,\n    number_of_makeup: parseInt(d.number_of_makeup) || 0,\n    \n    // Threading\n    thread_id: d.thread_id || null,\n    in_reply_to: d.in_reply_to || null,\n    \n    // Metadata\n   timestamp: new Date().toLocaleString(\"en-US\", {\n  timeZone: \"America/New_York\",\n  year: 'numeric',\n  month: '2-digit',\n  day: '2-digit',\n  hour: '2-digit',\n  minute: '2-digit',\n  second: '2-digit',\n  hour12: false\n}).replace(/(\\d+)\\/(\\d+)\\/(\\d+),/, '$3-$1-$2'),\n    workflow_execution_id: $execution.id,\n    is_initial: d.action_type === 'send_initial'\n  }\n}];"
+      },
+      "id":"[redacted-id]",
+      "name": "Validate & Prepare",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -608,
+        128
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "email_logs",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "client_message_id",
+              "condition": "eq",
+              "keyValue": "={{ $json.client_message_id }}"
+            }
+          ]
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Check Duplicate (email_logs)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -400,
+        128
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "supabaseApi": {
+          "id":"[redacted-id]",
+          "name": "Supabase account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $node['Check Duplicate (email_logs)'].json.length }}",
+              "operator": {
+                "type": "number",
+                "operation": "larger",
+                "value": 0
+              },
+              "id":"[redacted-id]"
+            },
+            {
+              "id":"[redacted-id]",
+              "leftValue": "=={{$items(\"Check Duplicate (email_logs)\").length > 0}}",
+              "rightValue": 0,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id":"[redacted-id]",
+      "name": "Is Duplicate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -208,
+        128
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, duplicate: true, message: 'Email already sent with this content', data: { gmail_message_id: null, gmail_thread_id: null }, new_status: 'Email Sent - Awaiting Reply', message_id: null, thread_id: null, client_message_id: $json.client_message_id, action_type: $json.action_type }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Respond Duplicate",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        0,
+        256
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $node[\"Validate & Prepare\"].json.customer_email }}",
+        "subject": "={{ $node[\"Validate & Prepare\"].json.email_subject }}",
+        "emailType": "text",
+        "message": "={{ $node[\"Validate & Prepare\"].json.email_content}}",
+        "options": {
+          "replyTo": "redacted@redacted-handle.com"
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Send Customer Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "webhookId": "[redacted-uuid]",
+      "credentials": {
+        "gmailOAuth2": {
+          "id":"[redacted-id]",
+          "name": "Gmail account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "tableId": "email_logs",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "org_id",
+              "fieldValue": "={{ $node[\"Validate & Prepare\"].json.org_id }}"
+            },
+            {
+              "fieldId": "customer_id",
+              "fieldValue": "={{ $node[\"Validate & Prepare\"].json.customer_id }}"
+            },
+            {
+              "fieldId": "email_from",
+              "fieldValue": "redacted@redacted-handle.com"
+            },
+            {
+              "fieldId": "email_to",
+              "fieldValue": "={{ $node[\"Validate & Prepare\"].json.customer_email }}"
+            },
+            {
+              "fieldId": "email_subject",
+              "fieldValue": "={{ $node[\"Validate & Prepare\"].json.email_subject }}"
+            },
+            {
+              "fieldId": "email_body",
+              "fieldValue": "={{ $node[\"Validate & Prepare\"].json.email_content }}"
+            },
+            {
+              "fieldId": "sent_by",
+              "fieldValue": "admin"
+            },
+            {
+              "fieldId": "thread_id",
+              "fieldValue": "={{ $node[\"Send Customer Email\"].json.threadId }}"
+            },
+            {
+              "fieldId": "timestamp",
+              "fieldValue": "={{ $node[\"Validate & Prepare\"].json.timestamp }}"
+            },
+            {
+              "fieldId": "message_id",
+              "fieldValue": "={{ $node[\"Send Customer Email\"].json.id }}"
+            },
+            {
+              "fieldId": "in_reply_to",
+              "fieldValue": "={{ $node[\"Validate & Prepare\"].json.in_reply_to}}"
+            },
+            {
+              "fieldId": "client_message_id",
+              "fieldValue": "={{ $node[\"Validate & Prepare\"].json.client_message_id }}"
+            },
+            {
+              "fieldId": "delivery_status",
+              "fieldValue": "sent"
+            },
+            {
+              "fieldId": "updated_at",
+              "fieldValue": "={{ $node[\"Validate & Prepare\"].json.timestamp ?? $now }}"
+            },
+            {
+              "fieldId": "direction",
+              "fieldValue": "outbound"
+            },
+            {
+              "fieldId": "headers",
+              "fieldValue": "={{ JSON.stringify({ \"Message-ID\": $node[\"Send Customer Email\"].json.id, \"Thread-ID\": $node[\"Send Customer Email\"].json.threadId }) }}"
+            }
+          ]
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Insert into email_logs",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        208,
+        0
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id":"[redacted-id]",
+          "name": "Supabase account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "customer_requests",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "customer_id",
+              "condition": "eq",
+              "keyValue": "={{ $node[\"Validate & Prepare\"].json.customer_id }}"
+            }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "current_status",
+              "fieldValue": "={{ $node[\"Validate & Prepare\"].json.new_status }}"
+            },
+            {
+              "fieldId": "last_email_sent",
+              "fieldValue": "={{ $node[\"Validate & Prepare\"].json.email_content }}"
+            },
+            {
+              "fieldId": "last_email_sent_at",
+              "fieldValue": "={{ $node[\"Validate & Prepare\"].json.timestamp ?? $now }}"
+            },
+            {
+              "fieldId": "email_subject_current",
+              "fieldValue": "={{ $node[\"Validate & Prepare\"].json.email_subject }}"
+            },
+            {
+              "fieldId": "updated_at",
+              "fieldValue": "={{ $node[\"Validate & Prepare\"].json.timestamp ?? $now }}"
+            }
+          ]
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Update customer_requests",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        400,
+        0
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id":"[redacted-id]",
+          "name": "Supabase account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "tableId": "activity_logs",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "org_id",
+              "fieldValue": "={{ $node[\"Validate & Prepare\"].json.org_id }}"
+            },
+            {
+              "fieldId": "customer_id",
+              "fieldValue": "={{ $node[\"Validate & Prepare\"].json.customer_id }}"
+            },
+            {
+              "fieldId": "action",
+              "fieldValue": "email_sent"
+            },
+            {
+              "fieldId": "action_details",
+              "fieldValue": "={{ $node[\"Validate & Prepare\"].json.action_type + ' - ' + $node[\"Validate & Prepare\"].json.email_subject }}"
+            },
+            {
+              "fieldId": "performed_by",
+              "fieldValue": "admin"
+            },
+            {
+              "fieldId": "timestamp",
+              "fieldValue": "={{ $node[\"Validate & Prepare\"].json.timestamp ?? $now }}"
+            },
+            {
+              "fieldId": "metadata",
+              "fieldValue": "={{ JSON.stringify({ message_id: $node[\"Send Customer Email\"].json.id, thread_id: $node[\"Send Customer Email\"].json.threadId }) }}"
+            },
+            {
+              "fieldId": "created_at",
+              "fieldValue": "={{ $now }}"
+            }
+          ]
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Log to activity_logs",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        608,
+        0
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id":"[redacted-id]",
+          "name": "Supabase account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, new_status: $json.new_status, message_id: $node['Send Customer Email'].json.id, thread_id: $node['Send Customer Email'].json.threadId || $json.thread_id, client_message_id: $json.client_message_id, timestamp: $json.timestamp }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Respond Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        800,
+        0
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "language": "javascript"
+      },
+      "id":"[redacted-id]",
+      "name": "Error Handler",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        384
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 500
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Respond Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        208,
+        384
+      ]
+    }
+  ],
+  "pinData": {
+    "Webhook from Retool": [
+      {
+        "json": {
+          "headers": {
+            "host": "yg1y37s9.rpcld.net",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+            "content-length": "1585",
+            "accept": "application/json",
+            "accept-encoding": "gzip, br",
+            "accept-language": "en-US,en;q=0.9,tr;q=0.8",
+            "cdn-loop": "cloudflare; loops=1",
+            "cf-connecting-ip": "2603:7081:663e:1612:e4:3cc2:68ff:2a1c",
+            "cf-ipcountry": "US",
+            "cf-ray": "97e49bd199de10dd-ORD",
+            "cf-visitor": "{\"scheme\":\"https\"}",
+            "content-type": "application/json",
+            "origin": "null",
+            "priority": "u=1, i",
+            "sec-ch-ua": "\"Chromium\";v=\"140\", \"Not=A?Brand\";v=\"24\", \"Google Chrome\";v=\"140\"",
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": "\"Windows\"",
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "cross-site",
+            "x-forwarded-for": "2603:7081:663e:1612:e4:3cc2:68ff:2a1c, 172.69.58.37",
+            "x-forwarded-host": "yg1y37s9.rpcld.net",
+            "x-forwarded-port": "443",
+            "x-forwarded-proto": "https",
+            "x-forwarded-server": "5d4514c4c21d",
+            "x-real-ip": "172.69.58.37"
+          },
+          "params": {},
+          "query": {},
+          "body": {
+            "org_id": "le-glam-team",
+            "customer_id": "CUST-1757284936473-XU2N",
+            "customer_name": "Melissa Smith",
+            "customer_email": " redacted@redacted-handle.com",
+            "email_subject": "🎉 New Booking at LE Glam — Melissa Smith — Nov 14, 2025",
+            "email_content": "Dear Melissa,\n\nThank you for your thoughtful questions — we’re excited to be part of your big day!\n\n1. For a wedding day appointment at our salon, we typically recommend arriving 15 minutes before your scheduled start time. Once we know your ceremony time, we can work backward to determine the best start time for your group.\n\n2. Yes, we can absolutely add one more person for hair styling. This would bring your total to 4 hair services, which qualifies for our regular rate of $135 per person. The additional service would add $135 to your total.\n\n3. We recommend scheduling your trial run 4–6 weeks before your wedding. Trials are available on Mondays at [redacted-address]
+            "action_type": "send_followup",
+            "new_status": "Follow-up Email Sent",
+            "event_date": "2025-11-14",
+            "ready_by_time": "15:00:00",
+            "service_location": "at the salon",
+            "number_of_hair": 3,
+            "number_of_makeup": 3,
+            "thread_id": null,
+            "in_reply_to": null,
+            "client_message_id": "[redacted-token]"
+          },
+          "webhookUrl": "https://yg1y37s9.rpcld.net/webhook/retool-email-send",
+          "executionMode": "production"
+        }
+      }
+    ]
+  },
+  "connections": {
+    "Webhook from Retool": {
+      "main": [
+        [
+          {
+            "node": "Validate & Prepare",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Handler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Prepare": {
+      "main": [
+        [
+          {
+            "node": "Check Duplicate (email_logs)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Handler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Duplicate (email_logs)": {
+      "main": [
+        [
+          {
+            "node": "Is Duplicate?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Duplicate?": {
+      "main": [
+        [
+          {
+            "node": "Respond Duplicate",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Error Handler",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Customer Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Customer Email": {
+      "main": [
+        [
+          {
+            "node": "Insert into email_logs",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Handler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert into email_logs": {
+      "main": [
+        [
+          {
+            "node": "Update customer_requests",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Handler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update customer_requests": {
+      "main": [
+        [
+          {
+            "node": "Log to activity_logs",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Handler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log to activity_logs": {
+      "main": [
+        [
+          {
+            "node": "Respond Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Handler": {
+      "main": [
+        [
+          {
+            "node": "Respond Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "[redacted-uuid]",
+  "meta": {
+    "[redacted-token]": true,
+    "instanceId": "[redacted-token]"
+  },
+  "id":"[redacted-id]",
+  "tags": []
+}

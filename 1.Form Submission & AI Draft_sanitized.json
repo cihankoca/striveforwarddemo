@@ -1,0 +1,565 @@
+{
+  "name": "1.Form Submission & AI Draft",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "tally-form-submission",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": false
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Webhook - Tally Form",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        48,
+        -208
+      ],
+      "webhookId": "[redacted-uuid]"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "1",
+              "name": "org_id",
+              "value": "={{$env.ORG_ID || 'le-glam-team'   }}",
+              "type": "string"
+            },
+            {
+              "id": "2",
+              "name": "customer_name",
+              "value": "={{ ($json.fields || $json.body?.data?.fields || []).find(f => f.key === 'question_rONBE5')?.value || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "3",
+              "name": "customer_email",
+              "value": "= {{ ($json.fields || $json.body?.data?.fields || []).find(f => f.key === 'question_47WBjB')?.value || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "4",
+              "name": "customer_phone",
+              "value": "= {{ ($json.fields || $json.body?.data?.fields || []).find(f => f.key === 'question_jodbx6')?.value || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "5",
+              "name": "event_date",
+              "value": "={{ ($json.fields || $json.body?.data?.fields || []).find(f => f.key === 'question_2AqBrA')?.value || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "6",
+              "name": "ready_by_time",
+              "value": "={{ ($json.fields || $json.body?.data?.fields || []).find(f => f.key === 'question_xDkjZJ')?.value || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "7",
+              "name": "event_start_time",
+              "value": "=",
+              "type": "string"
+            },
+            {
+              "id": "8",
+              "name": "service_location",
+              "value": "={{ ($json.fields || $json.body?.data?.fields || []).find(f => f.key === 'question_ZO4oJa')?.value || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "9",
+              "name": "number_of_hair",
+              "value": "={{ Number((($json.fields || $json.body?.data?.fields || []).find(f => f.key === 'question_NXKD0W')?.value) || 0) }}",
+              "type": "number"
+            },
+            {
+              "id": "10",
+              "name": "number_of_makeup",
+              "value": "={{ Number((($json.fields || $json.body?.data?.fields || []).find(f => f.key === 'question_qGxaPd')?.value) || 0) }}",
+              "type": "number"
+            },
+            {
+              "id": "11",
+              "name": "customer_notes",
+              "value": "={{ ($json.fields || $json.body?.data?.fields || []).find(f => f.key === 'question_QRgM0A')?.value || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "12",
+              "name": "current_status",
+              "value": "New Submission",
+              "type": "string"
+            },
+            {
+              "id": "13",
+              "name": "payment_status",
+              "value": "unpaid",
+              "type": "string"
+            },
+            {
+              "id": "14",
+              "name": "customer_id",
+              "value": "={{ 'CUST-' + Date.now() + '-' + Math.random().toString(36).substr(2, 4).toUpperCase() }}",
+              "type": "string"
+            },
+            {
+              "id": "15",
+              "name": "created_at",
+              "value": "={{ DateTime.now().setZone('America/New_York').toISO() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id":"[redacted-id]",
+      "name": "Format Form Data",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        256,
+        -208
+      ]
+    },
+    {
+      "parameters": {
+        "tableId": "customer_requests",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "org_id",
+              "fieldValue": "={{ $json.org_id }}"
+            },
+            {
+              "fieldId": "customer_name",
+              "fieldValue": "={{ $json.customer_name }}"
+            },
+            {
+              "fieldId": "customer_email",
+              "fieldValue": "={{ $json.customer_email }}"
+            },
+            {
+              "fieldId": "customer_phone",
+              "fieldValue": "={{ $json.customer_phone }}"
+            },
+            {
+              "fieldId": "event_date",
+              "fieldValue": "={{ $json.event_date }}"
+            },
+            {
+              "fieldId": "ready_by_time",
+              "fieldValue": "={{ $json.ready_by_time }}"
+            },
+            {
+              "fieldId": "service_location",
+              "fieldValue": "={{ $json.service_location }}"
+            },
+            {
+              "fieldId": "number_of_hair",
+              "fieldValue": "={{ $json.number_of_hair}}"
+            },
+            {
+              "fieldId": "number_of_makeup",
+              "fieldValue": "={{ $json.number_of_makeup}}"
+            },
+            {
+              "fieldId": "customer_notes",
+              "fieldValue": "={{  $json.customer_notes }}"
+            },
+            {
+              "fieldId": "current_status",
+              "fieldValue": "={{ $json.current_status }}"
+            },
+            {
+              "fieldId": "payment_status",
+              "fieldValue": "={{ $json.payment_status || 'unpaid' }}"
+            },
+            {
+              "fieldId": "customer_id",
+              "fieldValue": "={{ $json.customer_id }}"
+            },
+            {
+              "fieldId": "created_at",
+              "fieldValue": "={{ $json.created_at }}"
+            }
+          ]
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Create Customer Record",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        448,
+        -208
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id":"[redacted-id]",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "calendar",
+        "calendar": {
+          "__rl": true,
+          "value": "redacted@redacted-handle.com",
+          "mode": "list",
+          "cachedResultName": "redacted@redacted-handle.com"
+        },
+        "timeMin": "={{ DateTime.fromISO($json.event_date + 'T' + $json.ready_by_time, { zone:'America/New_York' }).minus({ hours: 3 }).toISO({ suppressMilliseconds: true }) }}",
+        "timeMax": "={{ DateTime.fromISO($json.event_date + 'T' + $json.ready_by_time, { zone:'America/New_York' }).toISO({ suppressMilliseconds: true }) }}",
+        "options": {}
+      },
+      "id":"[redacted-id]",
+      "name": "Check Stylist Availability",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.3,
+      "position": [
+        656,
+        -208
+      ],
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id":"[redacted-id]",
+          "name": "Google Calendar account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4",
+          "mode": "list"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=You are a professional beauty salon assistant for LE Glam Team. Create a personalized response email for a new booking inquiry.(no subject line)\n\nCustomer Details:\n- Name: {{ $node['Format Form Data'].json.customer_name }}\n- Event Date: {{ $node['Format Form Data'].json.event_date }}\n- Ready By Time: {{ $node['Format Form Data'].json.ready_by_time }}\n- Event Start Time: {{ $node['Format Form Data'].json.event_start_time }}\n- Location: {{ $node['Format Form Data'].json.service_location }}\n- Hair Services: {{ $node['Format Form Data'].json.number_of_hair }} people\n- Makeup Services: {{ $node['Format Form Data'].json.number_of_makeup }} people\n- Notes: {{ $node['Format Form Data'].json.customer_notes }}\n\nPricing Information:\n- Hair Styling: $135 per person\n- Makeup Application: $135 per person\n- Flower Girl (10 and under): $65\n- Parties less than 4: $185 per person\n- Travel Fee: $0.75 per mile round-trip from [redacted-address]
+            }
+          ]
+        },
+        "options": {
+          "maxTokens": 500,
+          "temperature": 0.7
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Generate AI Draft Email",
+      "type": "@redacted-handle/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [
+        784,
+        -368
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id":"[redacted-id]",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "customer_requests",
+        "filterType": "string",
+        "filterString": "=id=eq.{{ $node[\"Create Customer Record\"].json.id }}",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "ai_initial_draft",
+              "fieldValue": "={{ $node[\"Generate AI Draft Email\"].json.message.content }}"
+            },
+            {
+              "fieldId": "email_subject_current",
+              "fieldValue": "={{\n  \"🎉 New Booking at LE Glam — \" +\n  $node[\"Format Form Data\"].json.customer_name +\n  \" — \" +\n  (\n    $node[\"Format Form Data\"].json.event_date\n      ? DateTime.fromISO($node[\"Format Form Data\"].json.event_date).toFormat('MMM dd, yyyy')\n      : \"\"\n  )\n}}\n"
+            },
+            {
+              "fieldId": "base_price",
+              "fieldValue": "={{\n  (() => {\n    const hair = Number($node[\"Format Form Data\"].json.number_of_hair || 0);\n    const make = Number($node[\"Format Form Data\"].json.number_of_makeup || 0);\n    const total = hair + make;\n\n    // Fiyat kuralları\n    const NORMAL = 135;     // kişi başı (>=4 servis)\n    const SMALL  = 185;     // kişi başı (<4 servis)\n\n    let subtotal;\n    if (total >= 4) {\n      subtotal = (hair * NORMAL) + (make * NORMAL);\n    } else {\n      subtotal = total * SMALL;\n    }\n\n    // DECIMAL alanına uyum: string \"810.00\" gibi yaz\n    return subtotal.toFixed(2);\n  })()\n}}\n"
+            }
+          ]
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Update with AI Draft",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        1056,
+        -208
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id":"[redacted-id]",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "redacted@redacted-handle.com",
+        "subject": "=🎉 New Booking — {{ $json.customer_name }} — {{ DateTime.fromISO($json.event_date).toFormat('MMM dd, yyyy') }}",
+        "message": "=<html>\n<head>\n    <style>\n        body { font-family: Arial, sans-serif; }\n        .details { background: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0; }\n        .ai-draft { background: #e8f4f8; padding: 15px; border-radius: 5px; margin: 20px 0; }\n        .button { display: inline-block; background: #4CAF50; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; margin-top: 10px; }\n    </style>\n</head>\n<body>\n    <h2>New Booking Request Received!</h2>\n    <div class=\"details\">\n        <h3>Customer Details:</h3>\n        <p><strong>Name:</strong> {{ $node['Format Form Data'].json.customer_name }}</p>\n        <p><strong>Email:</strong> {{ $node['Format Form Data'].json.customer_email }}</p>\n        <p><strong>Phone:</strong> {{ $node['Format Form Data'].json.customer_phone }}</p>\n        <p><strong>Event Date:</strong> {{ $node['Format Form Data'].json.event_date }}</p>\n        <p><strong>Ready By Time:</strong> {{ $node['Format Form Data'].json.ready_by_time }}</p>\n        <p><strong>Location:</strong> {{ $node['Format Form Data'].json.service_location }}</p>\n        <p><strong>Services:</strong> {{ $node['Format Form Data'].json.number_of_hair }} Hair, {{ $node['Format Form Data'].json.number_of_makeup }} Makeup</p>\n    </div>\n    <div class=\"ai-draft\">\n        <h3>✨ AI Draft Email Ready!</h3>\n        <p>An AI-generated response has been created and is ready for your review.</p>\n        <a href=\"https://gostriveforward.retool.com/apps/[redacted-uuid]/LE%20Glam%20Customer%20Management/page1\" class=\"button\">Review & Send Email</a>\n    </div>\n    <hr style=\"margin: 30px 0;\">\n    <p style=\"color: #666; font-size: 12px;\">This is an automated notification from LE Glam Team Booking System</p>\n</body>\n</html>",
+        "options": {
+          "replyTo": "={{ $node['Format Form Data'].json.customer_email }}"
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Send Admin Notification",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1248,
+        -208
+      ],
+      "webhookId": "[redacted-uuid]",
+      "credentials": {
+        "gmailOAuth2": {
+          "id":"[redacted-id]",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": true,\n  \"message\": \"Form submission received and processed\",\n  \"customer_id\": \"{{ $node['Create Customer Record'].json.customer_id }}\",\n  \"status\": \"New Submission\",\n  \"ai_draft_created\": true,\n  \"admin_notified\": true\n}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          }
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1456,
+        -208
+      ]
+    }
+  ],
+  "pinData": {
+    "Webhook - Tally Form": [
+      {
+        "json": {
+          "headers": {
+            "host": "yg1y37s9.rpcld.net",
+            "user-agent": "Tally Webhooks",
+            "content-length": "1455",
+            "accept": "application/json, text/plain, */*",
+            "accept-encoding": "gzip, br",
+            "baggage": "sentry-environment=production,sentry-release=[redacted-token],sentry-public_key=[redacted-token],sentry-trace_id=[redacted-token],sentry-org_id=407628,sentry-sampled=false,sentry-sample_rand=0.4675819848986784,sentry-sample_rate=0.001",
+            "cdn-loop": "cloudflare; loops=1",
+            "cf-connecting-ip": "34.96.62.23",
+            "cf-ipcountry": "BE",
+            "cf-ray": "9797585e8de50c36-LHR",
+            "cf-visitor": "{\"scheme\":\"https\"}",
+            "content-type": "application/json",
+            "sentry-trace": "[redacted-token]",
+            "x-forwarded-for": "34.96.62.23, 172.68.229.158",
+            "x-forwarded-host": "yg1y37s9.rpcld.net",
+            "x-forwarded-port": "443",
+            "x-forwarded-proto": "https",
+            "x-forwarded-server": "5d4514c4c21d",
+            "x-real-ip": "172.68.229.158"
+          },
+          "params": {},
+          "query": {},
+          "body": {
+            "eventId": "[redacted-uuid]",
+            "eventType": "FORM_RESPONSE",
+            "createdAt": "2025-09-03T18:35:07.858Z",
+            "data": {
+              "responseId": "GxYGpRQ",
+              "submissionId": "GxYGpRQ",
+              "respondentId": "7B16qL",
+              "formId": "wbQpDe",
+              "formName": "\n\n LE Glam Team\n\n",
+              "createdAt": "2025-09-03T18:35:07.000Z",
+              "fields": [
+                {
+                  "key": "question_rONBE5",
+                  "label": "\n\nFull Name\n\n",
+                  "type": "INPUT_TEXT",
+                  "value": "Melissa Smith"
+                },
+                {
+                  "key": "question_47WBjB",
+                  "label": "\n\nEmail Address\n\n",
+                  "type": "INPUT_EMAIL",
+                  "value": "redacted@redacted-handle.com"
+                },
+                {
+                  "key": "question_jodbx6",
+                  "label": "\n\nPhone Number\n\n",
+                  "type": "INPUT_NUMBER",
+                  "value": [redacted-phone]
+                },
+                {
+                  "key": "question_2AqBrA",
+                  "label": "\n\nEvent Date\n\n",
+                  "type": "INPUT_DATE",
+                  "value": "2025-11-14"
+                },
+                {
+                  "key": "question_xDkjZJ",
+                  "label": "\n\nWhat time do you need to be ready by?\n\n",
+                  "type": "INPUT_TIME",
+                  "value": "15:00"
+                },
+                {
+                  "key": "question_ZO4oJa",
+                  "label": "\n\nWhere will the services take place?(Address(Home), Hotel Name, or “at the salon”)\n",
+                  "type": "INPUT_TEXT",
+                  "value": "at the salon"
+                },
+                {
+                  "key": "question_NXKD0W",
+                  "label": "\n\nNumber of Hair\n\n",
+                  "type": "INPUT_TEXT",
+                  "value": "3"
+                },
+                {
+                  "key": "question_qGxaPd",
+                  "label": "\n\nNumber of Makeup\n\n",
+                  "type": "INPUT_TEXT",
+                  "value": "3"
+                },
+                {
+                  "key": "question_QRgM0A",
+                  "label": "\n\nTell us more about your event or any special requests.\n\n",
+                  "type": "TEXTAREA",
+                  "value": " Wedding party, everyone needs to be ready by 3pm"
+                },
+                {
+                  "key": "question_9ZLXl1",
+                  "label": "How did you hear about us?",
+                  "type": "INPUT_TEXT",
+                  "value": "Friend"
+                }
+              ]
+            }
+          },
+          "webhookUrl": "https://yg1y37s9.rpcld.net/webhook/tally-form-submission",
+          "executionMode": "production"
+        }
+      }
+    ]
+  },
+  "connections": {
+    "Webhook - Tally Form": {
+      "main": [
+        [
+          {
+            "node": "Format Form Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Form Data": {
+      "main": [
+        [
+          {
+            "node": "Create Customer Record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Customer Record": {
+      "main": [
+        [
+          {
+            "node": "Check Stylist Availability",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Stylist Availability": {
+      "main": [
+        [
+          {
+            "node": "Generate AI Draft Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate AI Draft Email": {
+      "main": [
+        [
+          {
+            "node": "Update with AI Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update with AI Draft": {
+      "main": [
+        [
+          {
+            "node": "Send Admin Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Admin Notification": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "[redacted-uuid]",
+  "meta": {
+    "[redacted-token]": true,
+    "instanceId": "[redacted-token]"
+  },
+  "id":"[redacted-id]",
+  "tags": [
+    {
+      "createdAt": "2025-09-02T23:55:48.013Z",
+      "updatedAt": "2025-09-02T23:55:48.013Z",
+      "id":"[redacted-id]",
+      "name": "production"
+    }
+  ]
+}

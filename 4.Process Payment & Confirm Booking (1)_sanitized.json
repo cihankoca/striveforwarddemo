@@ -1,0 +1,1028 @@
+{
+  "name": "4.Process Payment & Confirm Booking",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "payments/received",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": false
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Webhook - Payment Received",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -608,
+        128
+      ],
+      "webhookId": "[redacted-uuid]"
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// --- Time helpers (NYC) ---\nconst nowNYC = () => {\n  const dt = new Date();\n  const fmt = new Intl.DateTimeFormat('en-CA', {\n    timeZone: 'America/New_York',\n    year:'numeric', month:'2-digit', day:'2-digit',\n    hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false\n  });\n  const p = Object.fromEntries(fmt.formatToParts(dt).map(v => [v.type, v.value]));\n  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}`; // dikkat: Z YOK\n};\n\nconst todayNYC = () => {\n  const fmt = new Intl.DateTimeFormat('en-CA', {\n    timeZone: 'America/New_York', year:'numeric', month:'2-digit', day:'2-digit'\n  });\n  return fmt.format(new Date()); // YYYY-MM-DD\n};\n\n// Common Utils — normalize + validate + idempotency\n\n/** @redacted-handle {any} */\nconst raw = $input.first()?.json ?? {};\n\n// 1) Canonicalize tenant/org & booking\nconst tenant_id =\n  raw.tenant_id ??\n  raw.org_id ??\n  raw.orgId ??\n  raw.organization_id ??\n  null;\n\nconst booking_id =\n  raw.booking_id ??\n  raw.bookingId ??\n  raw.id ??\n  raw.customer_request_id ??\n  raw.request_id ??\n  null;\n\n// 2) Compose normalized body (downstream için org_id'yi de set et)\n/** @redacted-handle {any} */\nconst body = {\n  ...raw,\n  tenant_id,\n  org_id: tenant_id,\n  booking_id,\n};\n\n// 3) Required field validation (type alanı zorunlu DEĞİL; auto detect ediyoruz)\nconst required = [\n  \"tenant_id\",\n  \"booking_id\",\n  \"amount\",\n  \"currency\",\n  \"payment_method\",\n  \"payment_status_label\",\n];\nconst missing = required.filter(\n  (k) => body[k] === undefined || body[k] === null || String(body[k]).trim() === \"\"\n);\nif (missing.length) {\n  return [\n    {\n      json: {\n        success: false,\n        error: \"MISSING_INPUT\",\n        diagnostics: { missing, original: raw },\n        http_status_hint: 400,\n      },\n    },\n  ];\n}\n\n// 4) Normalize amount (dollars/cents)\nconst normalizeAmount = (v) => {\n  if (typeof v !== \"number\") return Number(v ?? 0);\n  // >=1000 ise cent geliyor varsay (ör: 10000 → $100.00)\n  return v >= 1000 ? Math.round(v) / 100 : v;\n};\nconst amount_dollars = Number(normalizeAmount(body.amount).toFixed(2));\nconst amount_cents = Math.round(amount_dollars * 100);\n\n// 5) Auto-detect payment type from label (deposit/final)\nlet payment_type = String(body.type ?? \"auto\").toLowerCase();\nif (payment_type === \"auto\") {\n  const label = String(body.payment_status_label ?? \"\").toLowerCase();\n  if (label.includes(\"partial\") || label.includes(\"deposit\")) {\n    payment_type = \"deposit\";\n  } else if (label.includes(\"complete\") || label.includes(\"paid\")) {\n    payment_type = \"final\";\n  } else {\n    payment_type = \"deposit\"; // güvenli varsayılan\n  }\n}\n\n// … (senin mevcut normalize + validate kodunun içinde, idempotency_key'ten hemen önce/sonra uygun yere ekleyebilirsin)\n\n// ---- payment method normalize (label → enum) ----\nconst METHOD_MAP = [\n  { m: /stripe|online|card|credit/i, to: \"Stripe (Online)\" },\n  { m: /cash/i,                      to: \"Cash\" },\n  { m: /bank/i,                      to: \"Bank Transfer\" },\n  { m: /phone/i,                     to: \"Phone Payment\" },\n  { m: /venmo/i,                     to: \"Venmo\" },\n  { m: /zelle/i,                     to: \"Zelle\" },\n  { m: /check|cheque/i,              to: \"Check\" },\n];\nconst rawMethod = String(body.payment_method || \"\").trim();\nconst normalizedMethod =\n  (METHOD_MAP.find(x => x.m.test(rawMethod))?.to) || rawMethod || \"Cash\"; // default çok önemli değil\n\n// ---- payment status normalize (label/type → enum) ----\nconst rawStatus = String(body.payment_status_label || \"\").trim().toLowerCase();\n\nlet normalizedStatus;\nif (rawStatus.includes(\"refund\"))        normalizedStatus = \"Refunded\";\nelse if (rawStatus.includes(\"pending\"))  normalizedStatus = \"Pending\";\nelse if (rawStatus.includes(\"partial\") || rawStatus.includes(\"deposit\")) normalizedStatus = \"Partial Payment\";\nelse if (rawStatus.includes(\"complete\") || rawStatus.includes(\"paid\"))   normalizedStatus = \"Completed\";\nelse if (payment_type === \"deposit\")     normalizedStatus = \"Partial Payment\";\nelse if (payment_type === \"final\")       normalizedStatus = \"Completed\";\nelse                                     normalizedStatus = \"Unpaid\";\n\n\n// 6) Idempotency key (gün eklemeden, daha güçlü tekilleştirme)\n// İsterseniz güne göre tekilleştirmek için 'today' ekleyin:\nconst keyParts = [\n  body.tenant_id,\n  body.booking_id,\n  payment_type,\n  amount_dollars.toFixed(2),\n String(normalizedMethod || \"\").toLowerCase(),\n  // (opsiyonel) new Date().toISOString().split(\"T\")[0], // gün bazlı yapmak isterseniz açın\n];\nconst idempotency_key = keyParts.join(\":\");\n\n// 7) Processing fee (cents bazında hesapla → sonra dolar)\nconst calcFeeCents = (cents, method) => {\n  const m = String(method || \"\").toLowerCase();\n  if (m.includes(\"stripe\") || m.includes(\"card\") || m.includes(\"credit\")) {\n    return Math.round(cents * 0.036);\n  }\n  if (m.includes(\"venmo\")) {\n    return Math.round(cents * 0.02);\n  }\n  return 0; // cash, check, zelle, bank_transfer\n};\n\n// burası da:\nconst processing_fee_cents = calcFeeCents(amount_cents, normalizedMethod);\nconst processing_fee_dollars = processing_fee_cents / 100;\n\n// 8) Client message id (email_logs için uniq)\nconst processed_at = nowNYC();\nconst client_message_id = \"pay_\" + idempotency_key.replace(/:/g, \"_\");\n\nreturn [\n  {\n    json: {\n      // canonical root\n      tenant_id: body.tenant_id,\n      org_id: body.org_id,\n      booking_id: body.booking_id,\n\n      currency: body.currency || \"USD\",\n      validation_passed: true,\n\n      // normalized payment bundle\n      payment: {\n        amount_dollars,\n        amount_cents,\n        \n      method: normalizedMethod,     // <— enum isim\n      status: normalizedStatus,     // <— enum isim\n        type: payment_type,                // deposit | final\n        processing_fee_dollars,\n        processing_fee_cents,\n        processed_at,\n        idempotency_key,\n        client_message_id,\n      },\n    },\n  },\n];\n"
+      },
+      "id":"[redacted-id]",
+      "name": "Common Utils",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -432,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id":"[redacted-id]",
+                    "leftValue": "={{$json.payment.type}}",
+                    "rightValue": "deposit",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "deposit"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id":"[redacted-id]",
+                    "leftValue": "={{$json.payment.type}}",
+                    "rightValue": "final",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "final"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Route by Payment Type",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        -256,
+        128
+      ],
+      "outputNames": [
+        "deposit",
+        "final",
+        "error"
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "tableId": "customer_requests",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "org_id",
+              "keyValue": "={{ $json.org_id }}"
+            },
+            {
+              "keyName": "id",
+              "keyValue": "={{ $json.booking_id }}"
+            }
+          ]
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Get Request Details",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id":"[redacted-id]",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "tableId": "customer_requests",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "org_id",
+              "keyValue": "={{$json.org_id}}"
+            },
+            {
+              "keyName": "id",
+              "keyValue": "={{$json.booking_id}}"
+            }
+          ]
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Get Request Details (Final)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        0,
+        272
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id":"[redacted-id]",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "tableId": "email_logs",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "org_id",
+              "keyValue": "={{$json.org_id}}"
+            },
+            {
+              "keyName": "client_message_id",
+              "keyValue": "={{ $json.payment.client_message_id }}"
+            }
+          ]
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Check Idempotency (Email Logs)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        288,
+        16
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id":"[redacted-id]",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "/* Context Builder — NYC-safe context for AI, Calendar, Email */\n\n// ---------- NYC time helpers ----------\nconst pad = (x) => String(x).padStart(2, '0');\nconst parseHm = (t) => {\n  const m = String(t || '09:00').trim().match(/^(\\d{1,2})(?::(\\d{2}))?\\s*(AM|PM)?$/i);\n  let hh = 9, mm = 0;\n  if (m) {\n    hh = +m[1]; mm = +(m[2] || '0'); const ap = (m[3] || '').toUpperCase();\n    if (ap === 'PM' && hh < 12) hh += 12;\n    if (ap === 'AM' && hh === 12) hh = 0;\n  }\n  return { hh, mm };\n};\nconst todayNYC = () => {\n  const f = new Intl.DateTimeFormat('en-CA', {\n    timeZone: 'America/New_York', year:'numeric', month:'2-digit', day:'2-digit'\n  });\n  return f.format(new Date()); // 'YYYY-MM-DD'\n};\nconst nycDateTime = (dateStr, timeStr='09:00') => {\n  const { hh, mm } = parseHm(timeStr);\n  return `${dateStr}T${pad(hh)}:${pad(mm)}:00`; // Z yok → NYC yorumlanır\n};\n\n// ---------- Inputs ----------\n/** @redacted-handle {any} */\nconst input0 = $input.first()?.json ?? {};\n// @redacted-handle\nconst readNode = (name) => ($node?.[name]?.json ?? null);\n\n// Deposit / Final dalından hangisi varsa al\n/** @redacted-handle {any} */\nconst reqData = readNode('Get Request Details') || readNode('Get Request Details (Final)');\n/** @redacted-handle {any} */\nconst booking = Array.isArray(reqData) ? reqData[0] : reqData;\n\n// Idempotency (email_logs) duplicate kontrolü\nconst dupRow = readNode('Check Idempotency (Email Logs)');\nconst isDuplicate = !!(dupRow && (dupRow.id || dupRow.client_message_id));\n\nif (!booking || !booking.id) {\n  return [{\n    json: {\n      success: false,\n      error: 'BOOKING_NOT_FOUND',\n      diagnostics: { booking_id: input0.booking_id, org_id: input0.org_id },\n      http_status_hint: 404,\n    }\n  }];\n}\n\n// ---------- Finance ----------\nconst final_price    = Number(booking.final_price ?? 0);\nconst deposit_amount = Number(booking.deposit_amount ?? 0);\nconst already_paid   = Number(booking.amount_paid ?? 0);\nconst now_paid       = Number(input0.payment?.amount_dollars ?? 0);\nconst new_total_paid = Number((already_paid + now_paid).toFixed(2));\n\nconst calculateContractFees = () => {\n  const distance   = Number(booking.travel_distance ?? 0);\n  const numHair    = Number(booking.number_of_hair ?? 0);\n  const numMakeup  = Number(booking.number_of_makeup ?? 0);\n  const party_size = numHair + numMakeup;\n\n  let travel_fee = 0;\n  if (distance > 100)       travel_fee = (distance * 1.5) + 50;\n  else if (distance > 20)   travel_fee = distance * 1.0;\n\n  const holiday_fee = (booking.is_holiday || booking.holiday_service) ? final_price * 0.25 : 0;\n\n  let party_size_adjustment = 0;\n  const min_charge = 500;\n  if (party_size > 0 && party_size < 4 && final_price < min_charge) {\n    party_size_adjustment = min_charge - final_price;\n  }\n\n  let extra_stylist_fee = 0;\n  if (party_size > 8) {\n    const extra_stylists = Math.ceil((party_size - 8) / 4);\n    extra_stylist_fee = extra_stylists * 150;\n  }\n\n  const processing_fee = Number(input0.payment?.processing_fee_dollars ?? 0);\n\n  const total_fees        = processing_fee + travel_fee + holiday_fee + party_size_adjustment + extra_stylist_fee;\n  const grand_total       = final_price + total_fees;\n  const balance_remaining = Math.max(0, grand_total - new_total_paid);\n\n  return {\n    base_price: final_price,\n    processing_fee,\n    travel_fee,\n    holiday_fee,\n    party_size_adjustment,\n    extra_stylist_fee,\n    total_fees,\n    grand_total,\n    balance_remaining,\n  };\n};\nconst fees = /** @redacted-handle {any} */ (calculateContractFees());\n\n// ---------- Reminders (NYC-safe) ----------\nconst calculateReminders = () => {\n  if (!booking.event_date) return null;\n\n  const dStr = String(booking.event_date);               // 'YYYY-MM-DD'\n  const startDay = todayNYC();                           // NYC 'YYYY-MM-DD'\n  const daysUntil = Math.floor(\n    (Date.parse(`${dStr}T00:00:00`) - Date.parse(`${startDay}T00:00:00`))\n    / (1000 * 60 * 60 * 24)\n  );\n\n  const msEventStart = Date.parse(`${dStr}T00:00:00`);\n  const balanceDueMs = msEventStart - 7 * 24 * 60 * 60 * 1000;\n  const balanceDueNYC = new Intl.DateTimeFormat('en-CA', {\n    timeZone: 'America/New_York', year:'numeric', month:'2-digit', day:'2-digit'\n  }).format(new Date(balanceDueMs)); // 'YYYY-MM-DD'\n\n  return {\n    days_until_event: daysUntil,\n    t_minus_10: daysUntil >= 10,\n    t_minus_7: daysUntil >= 7 && fees.balance_remaining > 0,\n    t_minus_3: daysUntil >= 3,\n    t_minus_1: daysUntil >= 1,\n    balance_due_date: balanceDueNYC,\n  };\n};\n\n// (İsteğe bağlı) Calendar/Email için NYC start/end hazır stringleri\nconst event_start_time_nyc = nycDateTime(String(booking.event_date), booking.event_start_time || booking.ready_by_time || '12:00');\nconst event_end_time_nyc   = nycDateTime(String(booking.event_date), booking.ready_by_time || '15:00');\n\n// ---------- Output Context ----------\nconst ctx = {\n  tenant: { id: input0.org_id, name: booking.org_name || 'LE Glam' },\n\n  payment: { ...(input0.payment || {}), is_duplicate: isDuplicate },\n\n  booking: {\n    id: booking.id,\n    org_id: booking.org_id,\n    customer_id: booking.customer_id,\n    customer_name: booking.customer_name,\n    customer_email: booking.customer_email,\n    customer_phone: booking.customer_phone,\n    event_date: booking.event_date,\n    ready_by_time: booking.ready_by_time,\n    event_start_time: booking.event_start_time,\n    event_start_time_nyc,  // Z'siz NYC\n    event_end_time_nyc,    // Z'siz NYC\n    service_location: booking.service_location,\n    number_of_hair: Number(booking.number_of_hair ?? 0),\n    number_of_makeup: Number(booking.number_of_makeup ?? 0),\n    special_requests: booking.special_requests,\n    travel_distance: Number(booking.travel_distance ?? 0),\n    is_holiday: !!booking.is_holiday,\n    final_price,\n    deposit_amount,\n    amount_paid_before: already_paid,\n    amount_paid_after: new_total_paid,\n    google_event_id: booking.google_event_id ?? null,\n    current_status: booking.current_status,\n  },\n\n  invoice: {\n    subtotal: Math.round(final_price * 100),\n    processing_fee: Math.round(fees.processing_fee * 100),\n    travel_fee: Math.round(fees.travel_fee * 100),\n    holiday_fee: Math.round(fees.holiday_fee * 100),\n    party_size_adjustment: Math.round(fees.party_size_adjustment * 100),\n    extra_stylist_fee: Math.round(fees.extra_stylist_fee * 100),\n    total_fees: Math.round(fees.total_fees * 100),\n    total_with_fees: Math.round(fees.grand_total * 100),\n    deposit_paid: input0.payment?.type === 'deposit'\n      ? Math.round(now_paid * 100)\n      : Math.round(deposit_amount * 100),\n    balance_remaining: Math.round(fees.balance_remaining * 100),\n  },\n\n  email: { skip: isDuplicate },\n  reminders: calculateReminders(),\n  contract_rules_applied: true,\n};\n\nreturn [{ json: ctx }];\n"
+      },
+      "id":"[redacted-id]",
+      "name": "Context Builder",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        512,
+        16
+      ]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4O-MINI"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "You are LE Glam’s assistant. Return ONLY valid minified JSON with exactly these keys:\n{\"customer_summary\":\"...\",\"internal_summary\":\"...\"}\n- customer_summary: 1–2 sentences for the client (friendly).\n- internal_summary: 1–2 sentences for staff (logistics/status).\nNo extra keys, no markdown.\n",
+              "role": "system"
+            },
+            {
+              "content": "=`Tenant: ${$json.tenant?.name || 'LE Glam'}\nBooking: ${$json.booking?.id}\nEvent: ${$json.booking?.event_date} (ready by ${$json.booking?.ready_by_time || 'TBD'})\nCustomer: ${$json.booking?.customer_name} | ${$json.booking?.customer_email || ''} | ${$json.booking?.customer_phone || ''}\nPayment: type=${$json.payment?.type}, status=${$json.payment?.status}, method=${$json.payment?.method}, now=$${($json.payment?.amount_dollars ?? 0).toFixed(2)}\nTotals: paid_after=$${($json.booking?.amount_paid_after ?? 0).toFixed(2)}, balance=$${(($json.invoice?.balance_remaining ?? 0)/100).toFixed(2)}\nParty: hair=${$json.booking?.number_of_hair || 0}, makeup=${$json.booking?.number_of_makeup || 0}\nLocation: ${$json.booking?.service_location || 'TBD'}\nNotes: ${$json.booking?.special_requests || '—'}`\n"
+            }
+          ]
+        },
+        "simplify": false,
+        "jsonOutput": true,
+        "options": {
+          "maxTokens": 400,
+          "temperature": 0.3
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "AI Summarizer",
+      "type": "@redacted-handle/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [
+        656,
+        16
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id":"[redacted-id]",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "calendar": {
+          "__rl": true,
+          "value": "primary",
+          "mode": "list"
+        },
+        "additionalFields": {}
+      },
+      "id":"[redacted-id]",
+      "name": "Calendar Ensure Update",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.3,
+      "position": [
+        1168,
+        576
+      ],
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id":"[redacted-id]",
+          "name": "Google Calendar account"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "/**\n * Build Email Content (per item)\n * NYC time everywhere.\n */\nconst ctx = $json;\n\n// Güvenli kısayollar\nconst bk = ctx.booking ?? {};\nconst inv = ctx.invoice ?? {};\nconst pay = ctx.payment ?? {};\nconst reminders = ctx.reminders ?? {};\nconst clientSummary = String(ctx.customer_summary ?? '').trim();\n\n// Yardımcılar\nconst money = (cents) => `$${(Number(cents || 0) / 100).toFixed(2)}`;\n\n/** @redacted-handle {Intl.DateTimeFormatOptions} */\nconst dateFmt = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' };\nconst fmtNYCDate = (dateStr, timeStr) => {\n  if (!dateStr) return 'TBD';\n  const d = new Date(dateStr + 'T12:00:00Z'); // gün emniyeti\n  const pretty = new Intl.DateTimeFormat('en-US', { ...dateFmt, timeZone: 'America/New_York' }).format(d);\n  return pretty + (timeStr ? ` at ${timeStr} (NYC)` : '');\n};\n\n// E-posta başlığı\nconst isDeposit = String(pay.type || '').toLowerCase() === 'deposit';\nconst emailType = isDeposit ? 'Deposit Receipt' : 'Booking Confirmation';\nconst subject = `LE Glam - ${emailType} for ${bk.customer_name || 'Client'}`;\n\n// Mini fatura satırları\nconst feeRows = (() => {\n  let rows = '';\n  if (inv.travel_fee > 0) rows += `<tr><td>Travel Fee (${bk.travel_distance || 0} miles):</td><td>${money(inv.travel_fee)}</td></tr>`;\n  if (inv.holiday_fee > 0) rows += `<tr><td>Holiday Service Fee (25%):</td><td>${money(inv.holiday_fee)}</td></tr>`;\n  if (inv.party_size_adjustment > 0) rows += `<tr><td>Small Party Minimum:</td><td>${money(inv.party_size_adjustment)}</td></tr>`;\n  if (inv.extra_stylist_fee > 0) rows += `<tr><td>Additional Stylist Fee:</td><td>${money(inv.extra_stylist_fee)}</td></tr>`;\n  if (inv.processing_fee > 0) rows += `<tr><td>Processing Fee (${pay.method || 'card'}):</td><td>${money(inv.processing_fee)}</td></tr>`;\n  return rows;\n})();\n\n// Ödeme durumu bloğu\nconst statusMessage = Number(inv.balance_remaining || 0) > 0\n  ? `<div class=\"alert alert-warning\"><strong>&#x23F0; Balance Due:</strong> ${money(inv.balance_remaining)} is due 7 days before your event (${reminders.balance_due_date || 'TBD'}). We accept cash, check, Zelle, Venmo, and card payments.</div>`\n  : `<div class=\"alert alert-success\"><strong>&#10003; Booking Confirmed!</strong> Your booking is fully paid. We look forward to making you look and feel amazing!</div>`;\n\n// HTML gövde\nconst html = `<!DOCTYPE html>\n<html><head><meta charset=\"UTF-8\"><style>\n  body{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;background:#f5f5f7;margin:0;padding:20px}\n  .container{max-width:680px;margin:0 auto}\n  .header{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#fff;padding:40px 30px;border-radius:12px 12px 0 0;text-align:center}\n  .logo{font-size:32px;font-weight:700;letter-spacing:3px;margin-bottom:10px}.tagline{font-size:16px;opacity:.95}\n  .content{background:#fff;padding:30px;border:1px solid #e0e0e0}\n  .card{background:#f8f9fa;padding:20px;border-radius:8px;margin:20px 0;border-left:4px solid #667eea}\n  .invoice-table{width:100%;border-collapse:collapse;margin:15px 0}\n  .invoice-table td{padding:10px 0;border-bottom:1px solid #e0e0e0}\n  .invoice-table td:last-child{text-align:right;font-weight:500}\n  .invoice-table tr.total td{border-bottom:none;border-top:2px solid #333;padding-top:15px;font-weight:bold;font-size:1.1em}\n  .invoice-table tr.subtotal td{border-top:1px solid #dee2e6;padding-top:10px}\n  .alert{padding:15px 20px;border-radius:8px;margin:20px 0}\n  .alert-warning{background:#fff8e1;border-left:4px solid #ffc107;color:#856404}\n  .alert-success{background:#d4edda;border-left:4px solid #28a745;color:#155724}\n  .footer{padding:20px;text-align:center;color:#6c757d;font-size:14px;border-top:1px solid #e0e0e0;background:#fff;border-radius:0 0 12px 12px}\n  .badge{display:inline-block;padding:4px 10px;background:#667eea;color:#fff;border-radius:4px;font-size:12px;margin-left:10px}\n  .event-details{background:#fff;border:2px solid #667eea;border-radius:8px;padding:20px;margin:20px 0}\n  .detail-row{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #f0f0f0}\n  .detail-row:last-child{border-bottom:none}\n</style></head>\n<body><div class=\"container\">\n  <div class=\"header\"><div class=\"logo\">LE GLAM</div><div class=\"tagline\">Professional Hair & Makeup Services</div></div>\n  <div class=\"content\">\n    <h2 style=\"color:#333;margin-top:0;\">${emailType}</h2>\n    <p>Dear ${bk.customer_name || 'Client'},</p>\n    <p>${clientSummary || \"Thank you for your payment. We're excited to serve you!\"}</p>\n\n    <div class=\"event-details\">\n      <h3 style=\"margin-top:0;color:#667eea;\">Event Details</h3>\n      <div class=\"detail-row\"><span><strong>Date & Time:</strong></span>\n        <span>${fmtNYCDate(bk.event_date, bk.ready_by_time)}</span></div>\n      <div class=\"detail-row\"><span><strong>Location:</strong></span>\n        <span>${bk.service_location || 'To be confirmed'}</span></div>\n      <div class=\"detail-row\"><span><strong>Services:</strong></span>\n        <span>Hair x${bk.number_of_hair || 0}, Makeup x${bk.number_of_makeup || 0}</span></div>\n      ${bk.special_requests ? `<div class=\"detail-row\"><span><strong>Special Requests:</strong></span><span>${bk.special_requests}</span></div>` : ''}\n    </div>\n\n    <div class=\"card\">\n      <h3 style=\"margin-top:0;color:#667eea;\">Payment Summary</h3>\n      <table class=\"invoice-table\">\n        <tr><td>Service Total:</td><td>${money(inv.subtotal)}</td></tr>\n        ${feeRows}\n        ${Number(inv.total_fees || 0) > 0 ? `<tr class=\"subtotal\"><td><strong>Total with Fees:</strong></td><td><strong>${money(inv.total_with_fees)}</strong></td></tr>` : ''}\n        <tr style=\"color:#28a745;\"><td>Paid Today (${pay.type || 'payment'}):</td><td>-$${Number(pay.amount_dollars || 0).toFixed(2)}</td></tr>\n        ${String(pay.type).toLowerCase() === 'final' && Number(inv.deposit_paid || 0) > 0\n          ? `<tr style=\"color:#28a745;\"><td>Deposit Previously Paid:</td><td>-${money(inv.deposit_paid)}</td></tr>` : ''}\n        <tr class=\"total\"><td>Balance Due:</td>\n          <td>${Number(inv.balance_remaining || 0) > 0 ? money(inv.balance_remaining) : 'PAID IN FULL &#10003;'}</td></tr>\n      </table>\n    </div>\n\n    ${statusMessage}\n\n    ${Number(inv.balance_remaining || 0) > 0 ? `\n    <div class=\"card\">\n      <h3 style=\"margin-top:0;color:#667eea;\">Upcoming Reminders</h3>\n      <ul style=\"margin:10px 0;padding-left:20px;\">\n        ${reminders.t_minus_10 ? '<li>10 days before: General reminder</li>' : ''}\n        ${reminders.t_minus_7 ? '<li>7 days before: Balance due notification</li>' : ''}\n        ${reminders.t_minus_3 ? '<li>3 days before: Final preparation</li>' : ''}\n        ${reminders.t_minus_1 ? '<li>1 day before: Ready checklist</li>' : ''}\n      </ul>\n    </div>` : ''}\n  </div>\n\n  <div class=\"footer\">\n    <strong>LE GLAM Beauty Services</strong><br>\n    Questions? Reply to this email or call us<br>\n    <em style=\"color:#999;\">Per our service agreement, deposits are non-refundable</em><br>\n    <div style=\"margin-top:10px;font-size:12px;color:#aaa;\">\n      Payment ID: ${pay.idempotency_key || ''}<br>\n      ${pay.is_duplicate ? '<span class=\"badge\">Duplicate Payment - Original Receipt</span>' : ''}\n    </div>\n  </div>\n</div></body></html>`;\n\n// ÇIKIŞ: tek obje (Each Item modu)\nreturn {\n  json: {\n    ...ctx,\n    email: {\n      to: bk.customer_email || ctx.customer_email,\n      subject,\n      html,\n      client_message_id: pay.client_message_id,\n      type: emailType.toLowerCase().replace(/\\s+/g, '_'),\n      skip: false\n    }\n  }\n};\n"
+      },
+      "id":"[redacted-id]",
+      "name": "Build Email Content",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1488,
+        -16
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.email.skip}}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Skip Duplicate Emails",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1648,
+        -16
+      ]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{$json.email.to}}",
+        "subject": "={{$json.email.subject}}",
+        "message": "={{$json.email.html}}",
+        "options": {}
+      },
+      "id":"[redacted-id]",
+      "name": "Send Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1856,
+        80
+      ],
+      "webhookId": "[redacted-uuid]",
+      "alwaysOutputData": true,
+      "credentials": {
+        "gmailOAuth2": {
+          "id":"[redacted-id]",
+          "name": "Gmail account"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "tableId": "email_logs",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "org_id",
+              "fieldValue": "={{ $json.org_id }}"
+            },
+            {
+              "fieldId": "customer_id",
+              "fieldValue": "={{ $json.booking?.customer_id || $json.customer_id }}"
+            },
+            {
+              "fieldId": "direction",
+              "fieldValue": "outbound"
+            },
+            {
+              "fieldId": "email_from",
+              "fieldValue": "redacted@redacted-handle.com"
+            },
+            {
+              "fieldId": "email_to",
+              "fieldValue": "={{ $json.email?.to }}"
+            },
+            {
+              "fieldId": "email_subject",
+              "fieldValue": "={{ $json.email?.subject || '' }}"
+            },
+            {
+              "fieldId": "email_body",
+              "fieldValue": "={{ $json.email?.html || '' }}"
+            },
+            {
+              "fieldId": "sent_by",
+              "fieldValue": "admin"
+            },
+            {
+              "fieldId": "client_message_id",
+              "fieldValue": "={{ $json.email?.client_message_id }}"
+            },
+            {
+              "fieldId": "message_id",
+              "fieldValue": "={{ $json.id || null }}"
+            },
+            {
+              "fieldId": "thread_id",
+              "fieldValue": "={{ $json.threadId || null }}"
+            },
+            {
+              "fieldId": "in_reply_to",
+              "fieldValue": "={{ $json.inReplyTo || null }}"
+            },
+            {
+              "fieldId": "delivery_status",
+              "fieldValue": "={{ $json.email?.skip ? 'skipped' : ($json.error ? 'failed' : ($json.id || $json.threadId ? 'sent' : 'queued')) }}"
+            },
+            {
+              "fieldId": "headers",
+              "fieldValue": "={{ $json.error ? { error: { message: $json.error.message || $json.error, code: $json.error.code || null } } : null }}"
+            }
+          ]
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Log Email History",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        2192,
+        -48
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id":"[redacted-id]",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "customer_requests",
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "org_id",
+              "condition": "eq",
+              "keyValue": "={{$json.org_id}}"
+            },
+            {
+              "keyName": "customer_id",
+              "condition": "eq",
+              "keyValue": "={{$json.customer_id}}"
+            },
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{$json.booking.id}}"
+            }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "current_status",
+              "fieldValue": "={{ $json.payment?.type === 'deposit' ? 'Waiting for Payment' : 'Payment Received - Confirmed Email Sent' }}"
+            },
+            {
+              "fieldId": "google_event_id",
+              "fieldValue": "={{ $json.booking.google_event_id }}"
+            },
+            {
+              "fieldId": "amount_paid",
+              "fieldValue": "={{ $json.booking?.amount_paid_after }}"
+            },
+            {
+              "fieldId": "balance_remaining",
+              "fieldValue": "={{ ($json.invoice?.balance_remaining || 0) / 100 }}"
+            },
+            {
+              "fieldId": "payment_status",
+              "fieldValue": "={{ $json.payment?.type === 'deposit' ? 'Partial Payment' : 'Completed' }}"
+            },
+            {
+              "fieldId": "last_email_sent",
+              "fieldValue": "={{ $json.email?.html || '' }}"
+            },
+            {
+              "fieldId": "last_email_sent_at",
+              "fieldValue": "={{$now}}"
+            }
+          ]
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Update Customer Request",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        2400,
+        -48
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id":"[redacted-id]",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build comprehensive success response\nconst ctx = $input.first().json;\n\n// Handle error cases\nif (ctx.success === false) { \n  return [{ json: ctx }]; \n}\n\n// Build success response with all details\nconst response = {\n  success: true,\n  step: ctx.payment.type,\n  tenant_id: ctx.tenant?.id || ctx.org_id,\n  booking_id: ctx.booking.id,\n  payment_processed: {\n    amount_dollars: ctx.payment.amount_dollars,\n    amount_cents: ctx.payment.amount_cents,\n    method: ctx.payment.method,\n    type: ctx.payment.type,\n    status: ctx.payment.status,\n    idempotency_key: ctx.payment.idempotency_key,\n    is_duplicate: ctx.payment.is_duplicate || false,\n    processing_fee: ctx.payment.processing_fee_dollars\n  },\n  booking_status: {\n    current_status: ctx.payment.type === 'deposit' \n      ? 'Waiting for Payment' \n      : 'Payment Received - Confirmed Email Sent',\n    payment_status: ctx.payment.status,\n    amount_paid_total: ctx.booking.amount_paid_after,\n    [redacted-token]: (ctx.invoice.balance_remaining / 100).toFixed(2),\n    balance_status: ctx.invoice.balance_remaining > 0 \n      ? `$${(ctx.invoice.balance_remaining / 100).toFixed(2)} due` \n      : 'PAID IN FULL'\n  },\n  invoice_breakdown: {\n    base_price: (ctx.invoice.subtotal / 100).toFixed(2),\n    travel_fee: (ctx.invoice.travel_fee / 100).toFixed(2),\n    holiday_fee: (ctx.invoice.holiday_fee / 100).toFixed(2),\n    party_size_adjustment: (ctx.invoice.party_size_adjustment / 100).toFixed(2),\n    extra_stylist_fee: (ctx.invoice.extra_stylist_fee / 100).toFixed(2),\n    processing_fee: (ctx.invoice.processing_fee / 100).toFixed(2),\n    total_with_fees: (ctx.invoice.total_with_fees / 100).toFixed(2)\n  },\n  actions_taken: {\n    payment_saved: false,\n    idempotency_checked: true,\n    email_sent: !ctx.email?.skip,\n    email_logged: true,\n    calendar_updated: true,\n    request_updated: true,\n    ai_summary_generated: true,\n    contract_rules_applied: ctx.contract_rules_applied || false\n  },\n  next_steps: ctx.invoice.balance_remaining > 0 ? {\n    reminders_scheduled: [\n      ctx.reminders?.t_minus_10 ? `T-10 days: General reminder` : null,\n      ctx.reminders?.t_minus_7 ? `T-7 days: Balance due ($${(ctx.invoice.balance_remaining/100).toFixed(2)})` : null,\n      ctx.reminders?.t_minus_3 ? `T-3 days: Final reminder` : null,\n      ctx.reminders?.t_minus_1 ? `T-1 day: Preparation checklist` : null\n    ].filter(Boolean),\n    balance_due_date: ctx.reminders?.balance_due_date,\n    days_until_event: ctx.reminders?.days_until_event\n  } : {\n    message: 'Booking fully paid and confirmed',\n    event_date: ctx.booking.event_date,\n    days_until_event: ctx.reminders?.days_until_event\n  },\n  diagnostics: {\n    processing_timestamp: new Date().toISOString(),\n    google_event_id: ctx.booking.google_event_id || 'new_event_created',\n    email_client_message_id: ctx.email?.client_message_id\n  },\n  http_status_hint: 200\n};\n\nreturn [{ json: response }];"
+      },
+      "id":"[redacted-id]",
+      "name": "Build Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2720,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": "={{ $json.http_status_hint || 200 }}",
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "name": "X-Idempotency-Key",
+                "value": "={{ $json.payment_processed?.idempotency_key || '' }}"
+              },
+              {
+                "name": "X-Payment-Status",
+                "value": "={{ $json.booking_status?.balance_status || 'unknown' }}"
+              }
+            ]
+          }
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Respond Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        2880,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Handle routing errors and invalid payment types\nconst data = $input.first().json;\n\nreturn [{ \n  json: { \n    success: false, \n    error: data.error || \"INVALID_PAYMENT_TYPE\", \n    diagnostics: { \n      received_type: data.payment?.type || data.type || \"undefined\", \n      valid_types: [\"deposit\", \"final\", \"auto\"], \n      original_data: data,\n      help: \"Payment type must be one of: deposit, final, or auto (auto-detect)\",\n      timestamp: new Date().toISOString()\n    }, \n    http_status_hint: 400 \n  } \n}];"
+      },
+      "id":"[redacted-id]",
+      "name": "Error Handler",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        512
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pass through to response builder for error\nreturn $input.all();"
+      },
+      "id":"[redacted-id]",
+      "name": "Merge Skip Path",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1872,
+        -128
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id":"[redacted-id]",
+              "leftValue": "={{$json.booking.google_event_id}}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            },
+            {
+              "id":"[redacted-id]",
+              "leftValue": "",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        928,
+        16
+      ],
+      "id":"[redacted-id]",
+      "name": "Has Google Event ID?"
+    },
+    {
+      "parameters": {
+        "calendar": {
+          "__rl": true,
+          "value": "redacted@redacted-handle.com",
+          "mode": "id"
+        },
+        "start": "={{ $now }}={{(() => {\n  const d = $json.booking?.event_date || '';\n  const t = String($json.booking?.ready_by_time || '15:00').trim();\n  const m = t.match(/^(\\d{1,2})(?::(\\d{2}))?\\s*(AM|PM)?$/i);\n  let hh = 15, mm = 0;\n  if (m){ hh = +m[1]; mm = +(m[2]||'0'); const ap=(m[3]||'').toUpperCase();\n    if(ap==='PM'&&hh<12) hh+=12; if(ap==='AM'&&hh===12) hh=0; }\n  // d: YYYY-MM-DD → geri sarmayı da yap\n  let [Y,M,D] = d.split('-').map(n=>parseInt(n,10));\n  let minutes = hh*60 + mm - 180; // 3 saat geri\n  while (minutes < 0) {\n    minutes += 24*60;\n    const dt = new Date(Date.UTC(Y, M-1, D)); dt.setUTCDate(dt.getUTCDate()-1);\n    Y = dt.getUTCFullYear(); M = dt.getUTCMonth()+1; D = dt.getUTCDate();\n  }\n  const hh2 = Math.floor(minutes/60), mm2 = minutes%60;\n  const pad = x=>String(x).padStart(2,'0');\n  const dateStr = `${Y}-${pad(M)}-${pad(D)}`;\n  return `${dateStr}T${pad(hh2)}:${pad(mm2)}:00`; // Z YOK → NYC\n})()}}\n",
+        "end": "=={{(() => {\n  const d = $json.booking?.event_date || '';\n  const t = String($json.booking?.ready_by_time || '15:00').trim();\n  const m = t.match(/^(\\d{1,2})(?::(\\d{2}))?\\s*(AM|PM)?$/i);\n  let hh = 15, mm = 0;\n  if (m){ hh = +m[1]; mm = +(m[2]||'0'); const ap=(m[3]||'').toUpperCase();\n    if(ap==='PM'&&hh<12) hh+=12; if(ap==='AM'&&hh===12) hh=0; }\n  const pad = x=>String(x).padStart(2,'0');\n  return `${d}T${pad(hh)}:${pad(mm)}:00`; // Z YOK → NYC\n})()}}\n",
+        "additionalFields": {
+          "allday": "no",
+          "description": "=={{ [  `Event Date: ${$json.booking?.event_date} (ready by ${$json.booking?.ready_by_time || 'TBD'})`,  `Payment: ${$json.payment?.status} via ${$json.payment?.method}, now $${($json.payment?.amount_dollars||0).toFixed(2)}`,  `Totals: paid_after $${($json.booking?.amount_paid_after||0).toFixed(2)}, balance $${((($json.invoice?.balance_remaining||0)/100).toFixed(2))}`,  `Location: ${$json.booking?.service_location || 'TBD'}`,  `Notes: ${$json.booking?.special_requests || '—'}`,  `Customer summary: ${$json.customer_summary || ''}`,  `Internal summary: ${$json.internal_summary || ''}`].join('\\n') }}",
+          "sendUpdates": "all",
+          "summary": "={{ `LE Glam – ${$json.booking?.customer_name || 'Client'} (${String($json.payment?.type||'').toUpperCase()})` }}"
+        }
+      },
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.3,
+      "position": [
+        1088,
+        160
+      ],
+      "id":"[redacted-id]",
+      "name": "Create an event",
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id":"[redacted-id]",
+          "name": "Google Calendar account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "calendar": {
+          "__rl": true,
+          "value": "redacted@redacted-handle.com",
+          "mode": "id"
+        },
+        "eventId": "={{$json.booking.google_event_id}}",
+        "updateFields": {
+          "allday": "no",
+          "description": "=={{ [  `Event Date: ${$json.booking.event_date} (ready by ${$json.booking.ready_by_time || 'TBD'})`,  `Payment: ${$json.payment.status} via ${$json.payment.method}, now $${($json.payment.amount_dollars||0).toFixed(2)}`,  `Totals: paid_after $${($json.booking.amount_paid_after||0).toFixed(2)}, balance $${(($json.invoice.balance_remaining||0)/100).toFixed(2)}`,  `Location: ${$json.booking.service_location || 'TBD'}`,  `Notes: ${$json.booking.special_requests || '—'}`,  `Customer summary: ${$json.customer_summary || ''}`,  `Internal summary: ${$json.internal_summary || ''}`].join('\\n') }}",
+          "end": "=={{(() => {\n  const d = $json.booking?.event_date || '';\n  const t = String($json.booking?.ready_by_time || '15:00').trim();\n  const m = t.match(/^(\\d{1,2})(?::(\\d{2}))?\\s*(AM|PM)?$/i);\n  let hh = 15, mm = 0;\n  if (m){ hh = +m[1]; mm = +(m[2]||'0'); const ap=(m[3]||'').toUpperCase();\n    if(ap==='PM'&&hh<12) hh+=12; if(ap==='AM'&&hh===12) hh=0; }\n  const pad = x=>String(x).padStart(2,'0');\n  return `${d}T${pad(hh)}:${pad(mm)}:00`; // Z YOK → NYC kabul edilir\n})()}}\n",
+          "sendUpdates": "all",
+          "start": "=={{(() => {\n  const d = $json.booking?.event_date || '';\n  const t = String($json.booking?.ready_by_time || '15:00').trim();\n  const m = t.match(/^(\\d{1,2})(?::(\\d{2}))?\\s*(AM|PM)?$/i);\n  let hh = 15, mm = 0;\n  if (m){ hh = +m[1]; mm = +(m[2]||'0'); const ap=(m[3]||'').toUpperCase();\n    if(ap==='PM'&&hh<12) hh+=12; if(ap==='AM'&&hh===12) hh=0; }\n  // d: YYYY-MM-DD → bileşenlere ayır\n  let [Y,M,D] = d.split('-').map(n=>parseInt(n,10));\n  let minutes = hh*60 + mm - 180; // 3 saat geri\n  while (minutes < 0) {\n    minutes += 24*60;\n    const dt = new Date(Date.UTC(Y, M-1, D));\n    dt.setUTCDate(dt.getUTCDate()-1); // bir gün geri\n    Y = dt.getUTCFullYear(); M = dt.getUTCMonth()+1; D = dt.getUTCDate();\n  }\n  const hh2 = Math.floor(minutes/60), mm2 = minutes%60;\n  const pad = x=>String(x).padStart(2,'0');\n  const dateStr = `${Y}-${pad(M)}-${pad(D)}`;\n  return `${dateStr}T${pad(hh2)}:${pad(mm2)}:00`; // Z YOK\n})()}}\n",
+          "summary": "={{ `LE Glam – ${$json.booking.customer_name || 'Client'} (${String($json.payment.type||'').toUpperCase()})` }}"
+        }
+      },
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.3,
+      "position": [
+        1088,
+        -144
+      ],
+      "id":"[redacted-id]",
+      "name": "Update an event",
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id":"[redacted-id]",
+          "name": "Google Calendar account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Tek tip google_event_id üret ve akışı devam ettir\nconst eventId =\n  $json.id ??            // Create Event node'dan dönen id\n  $json.booking?.google_event_id ?? // Update akışında zaten var\n  null;\n\nreturn {\n  ...$json,\n  booking: {\n    ...($json.booking ?? {}),\n    google_event_id: eventId,\n  },\n};\n\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1312,
+        -16
+      ],
+      "id":"[redacted-id]",
+      "name": "Calendar Normalize"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id":"[redacted-id]",
+              "leftValue": "={{ !$json.error && $json.success !== false }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2048,
+        64
+      ],
+      "id":"[redacted-id]",
+      "name": "IF guard"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook - Payment Received": {
+      "main": [
+        [
+          {
+            "node": "Common Utils",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Common Utils": {
+      "main": [
+        [
+          {
+            "node": "Route by Payment Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by Payment Type": {
+      "main": [
+        [
+          {
+            "node": "Get Request Details",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get Request Details (Final)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Handler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Request Details": {
+      "main": [
+        [
+          {
+            "node": "Check Idempotency (Email Logs)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Request Details (Final)": {
+      "main": [
+        [
+          {
+            "node": "Check Idempotency (Email Logs)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Context Builder": {
+      "main": [
+        [
+          {
+            "node": "AI Summarizer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Summarizer": {
+      "main": [
+        [
+          {
+            "node": "Has Google Event ID?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calendar Ensure Update": {
+      "main": [
+        []
+      ]
+    },
+    "Build Email Content": {
+      "main": [
+        [
+          {
+            "node": "Skip Duplicate Emails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Skip Duplicate Emails": {
+      "main": [
+        [
+          {
+            "node": "Merge Skip Path",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Email": {
+      "main": [
+        [
+          {
+            "node": "IF guard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Skip Path": {
+      "main": [
+        [
+          {
+            "node": "IF guard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Email History": {
+      "main": [
+        [
+          {
+            "node": "Update Customer Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Customer Request": {
+      "main": [
+        [
+          {
+            "node": "Build Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Response": {
+      "main": [
+        [
+          {
+            "node": "Respond Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Handler": {
+      "main": [
+        [
+          {
+            "node": "Build Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Idempotency (Email Logs)": {
+      "main": [
+        [
+          {
+            "node": "Context Builder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create an event": {
+      "main": [
+        [
+          {
+            "node": "Calendar Normalize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Google Event ID?": {
+      "main": [
+        [
+          {
+            "node": "Update an event",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create an event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update an event": {
+      "main": [
+        [
+          {
+            "node": "Calendar Normalize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calendar Normalize": {
+      "main": [
+        [
+          {
+            "node": "Build Email Content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF guard": {
+      "main": [
+        [
+          {
+            "node": "Log Email History",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "[redacted-uuid]",
+  "meta": {
+    "[redacted-token]": true,
+    "instanceId": "[redacted-token]"
+  },
+  "id":"[redacted-id]",
+  "tags": [
+    {
+      "createdAt": "2025-09-15T23:05:48.677Z",
+      "updatedAt": "2025-09-15T23:05:48.677Z",
+      "id":"[redacted-id]",
+      "name": "idempotent"
+    },
+    {
+      "createdAt": "2025-09-15T23:05:48.682Z",
+      "updatedAt": "2025-09-15T23:05:48.682Z",
+      "id":"[redacted-id]",
+      "name": "payment-processing"
+    },
+    {
+      "createdAt": "2025-09-02T23:55:48.013Z",
+      "updatedAt": "2025-09-02T23:55:48.013Z",
+      "id":"[redacted-id]",
+      "name": "production"
+    }
+  ]
+}

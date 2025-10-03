@@ -1,0 +1,922 @@
+{
+  "name": "3.Customer Reply Handler",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {
+          "labelIds": [
+            "INBOX"
+          ],
+          "q": "to:redacted@redacted-handle.com",
+          "readStatus": "unread"
+        },
+        "options": {}
+      },
+      "id":"[redacted-id]",
+      "name": "Gmail Reply Monitor",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -2576,
+        112
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id":"[redacted-id]",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// @redacted-handle\n// Robust extractor + New York time (America/New_York) ISO output\n\nconst NY_TZ = 'America/New_York';\nconst msg = $input.first().json;\n\n/** ---------- helpers ---------- **/\nconst normalizeHeaders = (m) => {\n  // supports both object-style (msg.headers) and array-style (msg.payload.headers)\n  if (m.headers && typeof m.headers === 'object' && !Array.isArray(m.headers)) {\n    const map = {};\n    for (const [k, v] of Object.entries(m.headers)) map[String(k).toLowerCase()] = String(v ?? '');\n    return map;\n  }\n  if (Array.isArray(m.payload?.headers)) {\n    const map = {};\n    for (const h of m.payload.headers) map[String(h.name || '').toLowerCase()] = String(h.value || '');\n    return map;\n  }\n  return {};\n};\n\nconst getHeader = (map, name) => {\n  let v = map[String(name).toLowerCase()] ?? null;\n  if (!v) return null;\n  return String(v).replace(/^[A-Za-z-]+:\\s*/, '').trim(); // strip \"From: \"\n};\n\n// format Date to ISO with timezone offset, e.g. 2025-09-10T11:23:45-04:00\nconst toTzIso = (date, timeZone) => {\n  const parts = new Intl.DateTimeFormat('en-CA', {\n    timeZone, year: 'numeric', month: '2-digit', day: '2-digit',\n    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,\n  }).formatToParts(date);\n  const m = Object.fromEntries(parts.map(p => [p.type, p.value]));\n  // get GMT offset like \"GMT-04:00\"\n  const tzParts = new Intl.DateTimeFormat('en-US', {\n    timeZone, timeZoneName: 'longOffset',\n  }).formatToParts(date);\n  const tzName = (tzParts.find(p => p.type === 'timeZoneName')?.value) || 'GMT+00:00';\n  const mo = tzName.match(/GMT([+-]\\d{2}):?(\\d{2})?/);\n  const offset = mo ? `${mo[1]}:${mo[2] || '00'}` : '+00:00';\n  return `${m.year}-${m.month}-${m.day}T${m.hour}:${m.minute}:${m.second}${offset}`;\n};\n\n// clean email address out of \"Name <redacted@redacted-handle.com>\"\nconst extractEmail = (fromText, msg) => {\n  if (msg.from?.value?.[0]?.address) return msg.from.value[0].address;\n  if (!fromText) return '';\n  const m = fromText.match(/[^\\s<>,\"']+@[^\\s<>,\"']+/);\n  return m ? m[0] : '';\n};\n/** ---------- /helpers ---------- **/\n\nconst headers = normalizeHeaders(msg);\n\nconst subject   = msg.subject || getHeader(headers, 'subject') || '';\nconst fromText  = (msg.from?.text) || getHeader(headers, 'from') || '';\nconst toText    = (msg.to?.text)   || getHeader(headers, 'to')   || '';\n\nlet body = msg.text || '';\nif (!body && msg.textAsHtml) {\n  body = msg.textAsHtml.replace(/<br\\s*\\/?>/gi, '\\n')\n                       .replace(/<[^>]+>/g, '')\n                       .replace(/&nbsp;/g, ' ')\n                       .trim();\n}\nif (!body && typeof msg.snippet === 'string') body = msg.snippet;\n\nconst fromEmail = extractEmail(fromText, msg);\n\nconst messageId  = (msg.messageId || msg.id || getHeader(headers, 'message-id') || '')\n                    .replace(/[<>]/g, '') || null;\nconst threadId   = msg.threadId || null;\n\n// raw dates (UTC)\nconst rawMsgDate = msg.date || getHeader(headers, 'date') || null;\nconst msgDateObj = rawMsgDate ? new Date(rawMsgDate) : null;\n\n// New York ISO outputs (with -04:00 / -05:00)\nconst dateNY      = msgDateObj ? toTzIso(msgDateObj, NY_TZ) : null;\nconst timestampNY = toTzIso(new Date(), NY_TZ);\n\n// keep UTC too (optional, faydalı debug)\nconst dateUTC      = msgDateObj ? msgDateObj.toISOString() : null;\nconst timestampUTC = new Date().toISOString();\n\nconst inReplyTo  = getHeader(headers, 'in-reply-to');\nconst references = getHeader(headers, 'references');\nconst isReply    = !!(msg.replyTo || inReplyTo || references || (subject && /^re:/i.test(subject)));\n\nconst uniqueId = `reply_${Date.now()}_${Math.random().toString(36).slice(2,9)}`;\n\nreturn {\n  messageId,\n  threadId,\n  from: fromText,\n  to: toText,\n  subject,\n\n  // New York / Eastern Time\n  date: dateNY,               // <-- ET (America/New_York)\n  timestamp: timestampNY,     // <-- ET (America/New_York)\n\n  // optional: keep UTC originals too\n  date_utc: dateUTC,\n  timestamp_utc: timestampUTC,\n\n  inReplyTo,\n  references,\n  body,\n  fromEmail,\n  isReply,\n  labelIds: msg.labelIds || [],\n  uniqueId,\n};\n"
+      },
+      "id":"[redacted-id]",
+      "name": "Extract Email Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2400,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "email_logs",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "thread_id",
+              "condition": "eq",
+              "keyValue": "={{ $json.threadId }}"
+            }
+          ]
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Find Thread in DB",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -2160,
+        112
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "supabaseApi": {
+          "id":"[redacted-id]",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "customer_requests",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "customer_email",
+              "condition": "eq",
+              "keyValue": "={{ $node['Extract Email Data'].json.fromEmail }}"
+            }
+          ]
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Find Customer by Email",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -2160,
+        272
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "supabaseApi": {
+          "id":"[redacted-id]",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Customer Matching Logic with Confidence Score\nconst emailData = $node['Extract Email Data'].json;\nconst threadResult = $node['Find Thread in DB'].json;\nconst emailResult = $node['Find Customer by Email'].json;\n\nlet matchResult = {\n  found: false,\n  confidence: 0,\n  matchType: null,\n  customerId: null,\n  customerName: null,\n  customerEmail: null,\n  needsManualReview: false,\n  createNew: false\n};\n\n// 1. Thread-based matching (100% confidence)\nif (threadResult && threadResult.customer_id) {\n  matchResult = {\n    found: true,\n    confidence: 100,\n    matchType: 'thread',\n    customerId: threadResult.customer_id,\n    customerName: threadResult.customer_name || '',\n    customerEmail: emailData.fromEmail,\n    needsManualReview: false,\n    createNew: false\n  };\n  console.log('Match found via Thread ID');\n}\n// 2. Email-based matching (90% confidence)\nelse if (emailResult && emailResult.customer_id) {\n  matchResult = {\n    found: true,\n    confidence: 90,\n    matchType: 'email',\n    customerId: emailResult.customer_id,\n    customerName: emailResult.customer_name,\n    customerEmail: emailResult.customer_email,\n    needsManualReview: false,\n    createNew: false\n  };\n  console.log('Match found via Email');\n}\n// 3. Subject similarity check for lower confidence\nelse if (emailData.subject) {\n  // Check if subject contains known patterns\n  const knownPatterns = [\n    /LE Glam/i,\n    /booking/i,\n    /appointment/i,\n    /makeup/i,\n    /hair/i,\n    /wedding/i\n  ];\n  \n  const matchCount = knownPatterns.filter(pattern => \n    pattern.test(emailData.subject)\n  ).length;\n  \n  const subjectConfidence = (matchCount / knownPatterns.length) * 100;\n  \n  if (subjectConfidence >= 70) {\n    matchResult = {\n      found: false,\n      confidence: subjectConfidence,\n      matchType: 'subject_similarity',\n      customerId: null,\n      customerName: null,\n      customerEmail: emailData.fromEmail,\n      needsManualReview: true,\n      createNew: false\n    };\n  } else {\n    // New customer inquiry\n    matchResult = {\n      found: false,\n      confidence: subjectConfidence,\n      matchType: 'none',\n      customerId: null,\n      customerName: null,\n      customerEmail: emailData.fromEmail,\n      needsManualReview: false,\n      createNew: true\n    };\n  }\n}\n\n// Add email data to result\nmatchResult.emailData = emailData;\nmatchResult.timestamp = new Date().toISOString();\n\nconsole.log('Match Result:', matchResult);\nreturn matchResult;"
+      },
+      "id":"[redacted-id]",
+      "name": "Smart Customer Matcher",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1600,
+        176
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.confidence }}",
+              "operator": {
+                "type": "number",
+                "operation": "gte",
+                "value": 90
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id":"[redacted-id]",
+      "name": "High Confidence?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -1408,
+        176
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "email_logs",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "customer_id",
+              "condition": "eq",
+              "keyValue": "={{ $node['Smart Customer Matcher'].json.customerId }}"
+            }
+          ]
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Get Conversation History",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -1104,
+        -160
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id":"[redacted-id]",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "chatgpt-4o-latest",
+          "mode": "list",
+          "cachedResultName": "CHATGPT-4O-LATEST"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=You are an AI assistant for LE Glam Team beauty salon. Analyze this customer email and generate a follow-up response.\n\n## Customer Information\n- Name: {{ $item(0).$node['Smart Customer Matcher'].json.customerName || \"there\" }}\n- Email: {{ $item(0).$node['Smart Customer Matcher'].json.customerEmail || $item(0).$node['Extract Email Data'].json.fromEmail }}\n- Customer ID: {{ $item(0).$node['Smart Customer Matcher'].json.customerId }}\n- Local Time Zone: America/New_York\n\n## Conversation History (all rows)\n{{ JSON.stringify($items('Get Conversation History').map(i => i.json), null, 2) }}\n\n## Current Email\nFrom: {{ $item(0).$node['Extract Email Data'].json.from }}\nSubject: {{ $item(0).$node['Extract Email Data'].json.subject || \"(no subject)\" }}\nBody: {{ $item(0).$node['Extract Email Data'].json.body }}\nReceivedAt(ET): {{$now.setZone('America/New_York').toISO()}}\n\n## Task\n1. Determine the customer's INTENT (choose one):\n   - payment_confirmation\n   - reschedule_request\n   - service_question\n   - price_inquiry\n   - cancellation\n   - general_question\n   - complaint\n   - compliment\n\n2. Extract KEY INFORMATION:\n   - Any dates mentioned\n   - Any times mentioned\n   - Payment method preference\n   - Service changes requested\n   - Urgent matters\n\n3. Suggest RESPONSE TYPE (choose one):\n   - send_payment_link\n   - confirm_booking\n   - answer_question\n   - escalate_to_admin\n   - send_reminder\n   - no_action_needed\n\n4. Generate a PROFESSIONAL FOLLOW-UP DRAFT EMAIL that admin can send:\n   - Start with \"Dear [Customer Name],\"\n   - Address their specific questions/concerns\n   - Include relevant details (dates, prices, services) ONLY if they appear in the conversation history or the current message. DO NOT invent prices or promises.\n   - Use Eastern Time (America/New_York) for any times\n   - If information is missing, ask concise, numbered questions to move forward\n   - Provide clear next steps\n   - End with the signature (plain text, no HTML):\n     Best regards,\\n\\nLE Glam Team\\n[redacted-address]
+            }
+          ]
+        },
+        "jsonOutput": true,
+        "options": {
+          "maxTokens": 700,
+          "temperature": 0.3
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "AI Agent Analysis & Draft",
+      "type": "@redacted-handle/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [
+        -960,
+        -320
+      ],
+      "executeOnce": true,
+      "credentials": {
+        "openAiApi": {
+          "id":"[redacted-id]",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "customer_requests",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "customer_id",
+              "condition": "eq",
+              "keyValue": "={{ $node['Smart Customer Matcher'].json.customerId }}"
+            }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "current_status",
+              "fieldValue": "Customer Replied"
+            },
+            {
+              "fieldId": "customer_reply",
+              "fieldValue": "={{ $node['Extract Email Data'].json.body }}"
+            },
+            {
+              "fieldId": "last_customer_reply_at",
+              "fieldValue": "={{ $now }}"
+            },
+            {
+              "fieldId": "ai_analysis",
+              "fieldValue": "={{ JSON.stringify($node['AI Agent Analysis & Draft'].json) }}"
+            },
+            {
+              "fieldId": "ai_follow_up_draft",
+              "fieldValue": "={{ $json[\"message\"][\"content\"][\"follow_up_draft\"] }}"
+            },
+            {
+              "fieldId": "conversation_summary",
+              "fieldValue": "={{ $json[\"message\"][\"content\"][\"conversation_summary\"] }}"
+            },
+            {
+              "fieldId": "updated_at",
+              "fieldValue": "={{ $now }}"
+            }
+          ]
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Update Customer Status",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -608,
+        64
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id":"[redacted-id]",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "redacted@redacted-handle.com",
+        "subject": "=🔔 Customer Replied - {{ $node['Smart Customer Matcher'].json.customerName }}",
+        "message": "=<html>\n<head>\n  <style>\n    body { font-family: Arial, sans-serif; max-width: 680px; margin: 0 auto; }\n    .header { background: #4CAF50; color: white; padding: 20px; border-radius: 5px 5px 0 0; }\n    .content { background: #f5f5f5; padding: 20px; }\n    .section { background: white; padding: 15px; margin: 10px 0; border-radius: 5px; }\n    .grid { display: grid; grid-template-columns: 170px 1fr; gap: 6px 14px; }\n    .label { color: #666; }\n    .button { display: inline-block; background: #4CAF50; color: white; padding: 12px 20px; text-decoration: none; border-radius: 6px; margin: 14px 5px; }\n    .ai-draft { background: #e8f4f8; }\n    .pill { background: #ffeb3b; padding: 2px 8px; border-radius: 4px; }\n  </style>\n</head>\n<body>\n  <div class=\"header\">\n    <h2>📧 Customer Reply Received</h2>\n    <p style=\"margin: 0;\">\n      {{ $node['Update Customer Status'].json.customer_name \n         || $node['Smart Customer Matcher'].json.customerName \n         || 'Customer' }} has replied to your email\n    </p>\n  </div>\n\n  <div class=\"content\">\n    <div class=\"section\">\n\n            <div class=\"details\">\n        <h3>Customer Details:</h3>\n        <p><strong>Name:</strong> {{ $node['Update Customer Status'].json.customer_name \n                || $node['Smart Customer Matcher'].json.customerName }}</p>\n        <p><strong>Email:</strong> {{ $node['Update Customer Status'].json.customer_email \n                || $node['Smart Customer Matcher'].json.customerEmail }}</p>\n        <p><strong>Phone:</strong> {{ $node['Update Customer Status'].json.customer_phone || '-' }}</p>\n        <p><strong>Event Date:</strong>{{ $node['Update Customer Status'].json.event_date || '-' }}</p>\n        <p><strong>Ready By Time:</strong>{{ $node['Update Customer Status'].json.ready_by_time || '-' }}</p>\n        <p><strong>Location:</strong> {{ $node['Update Customer Status'].json.service_location || '-' }}</p>\n        <p><strong>Services:</strong> {{ ($node['Update Customer Status'].json.number_of_hair || 0)  }} Hair,\n          {{ ($node['Update Customer Status'].json.number_of_makeup || 0)}} Makeup</p>\n    </div>\n\n\n\n      </div>\n    </div>\n\n    <div class=\"section\">\n      <h3>Customer's Message</h3>\n      <div style=\"background: #f9f9f9; padding: 15px; border-left: 3px solid #2196F3;\">\n        <p><strong>Subject:</strong> {{ $node['Extract Email Data'].json.subject }}</p>\n        <pre style=\"white-space: pre-wrap; font-family: Arial, sans-serif;\">\n{{ $node['Extract Email Data'].json.body }}\n        </pre>\n      </div>\n    </div>\n\n    <div class=\"section ai-draft\">\n      <h3>✨ AI Generated Follow-up Draft</h3>\n      <div style=\"background: white; padding: 15px; border: 1px solid #ddd; border-radius: 5px;\">\n        <pre style=\"white-space: pre-wrap; font-family: Arial, sans-serif;\">{{ $node['AI Agent Analysis & Draft'].json.message.content.follow_up_draft }}</pre>\n      </div>\n      <p style=\"color: #666; font-size: 12px; margin-top: 10px;\">\n        This draft has been saved to the customer record and is ready to send from Retool.\n      </p>\n    </div>\n\n    <div class=\"section\">\n      <h3>AI Analysis Summary</h3>\n      <p>{{ $node['AI Agent Analysis & Draft'].json.message.content.conversation_summary }}</p>\n      <p><strong>Suggested Action:</strong> {{ $node['AI Agent Analysis & Draft'].json.message.content.suggested_action }}</p>\n    </div>\n\n    <div style=\"text-align: center; margin: 20px 0;\">\n      <a href=\"https://gostriveforward.retool.com/apps/[redacted-uuid]/LE%20Glam%20Customer%20Management/page1\" class=\"button\">\n        📝 Review & Send Follow-up \n      </a>\n    </div>\n  </div>\n\n  <div style=\"background: #f5f5f5; padding: 15px; text-align: center; color: #666; font-size: 12px;\">\n    <p>This is an automated notification from LE Glam Team Booking System</p>\n    <p>The follow-up draft is ready to review and send from your dashboard</p>\n  </div>\n</body>\n</html>\n",
+        "options": {}
+      },
+      "id":"[redacted-id]",
+      "name": "Notify Admin - Customer Reply",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        -400,
+        64
+      ],
+      "webhookId": "[redacted-uuid]",
+      "credentials": {
+        "gmailOAuth2": {
+          "id":"[redacted-id]",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ ['true', true, 1, '1', 'yes'].includes(\n     $node[\"AI Agent Analysis & Draft\"].json.message?.content?.[redacted-token] ?? false\n) }}\n",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              },
+              "id":"[redacted-id]"
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id":"[redacted-id]",
+      "name": "Needs Urgent Admin?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -208,
+        64
+      ]
+    },
+    {
+      "parameters": {
+        "sendTo": "redacted@redacted-handle.com",
+        "subject": "=🚨 URGENT: Customer Reply Needs Immediate Attention - {{ $node['Smart Customer Matcher'].json.customerName }}",
+        "message": "=<h2 style=\"color: red;\">⚠️ URGENT: Immediate Admin Attention Required</h2>\n<div style=\"background: #ffebee; padding: 15px; border-radius: 5px; border-left: 4px solid #f44336;\">\n  <p><strong>Customer:</strong> {{ $node['Smart Customer Matcher'].json.customerName }}</p>\n  <p><strong>Email:</strong> {{ $node['Smart Customer Matcher'].json.customerEmail }}</p>\n  <p><strong>Intent:</strong> {{ $node['AI Agent Analysis & Draft'].json.intent }}</p>\n  <p><strong>Urgency:</strong> <span style=\"color: red; font-weight: bold;\">{{ $node['AI Agent Analysis & Draft'].json.urgency }}</span></p>\n</div>\n\n<h3>Reason for Urgency:</h3>\n<div style=\"background: #fff3cd; padding: 15px; border-radius: 5px;\">\n  <p>{{ $node['AI Agent Analysis & Draft'].json.conversation_summary }}</p>\n</div>\n\n<h3>Customer Message:</h3>\n<div style=\"background: #f5f5f5; padding: 15px; border-radius: 5px;\">\n  {{ $node['Extract Email Data'].json.body }}\n</div>\n\n<div style=\"margin: 20px 0; text-align: center;\">\n  <a href=\"https://gostriveforward.retool.com/apps/[redacted-uuid]/LE%20Glam%20Customer%20Management/page1\" style=\"background: #f44336; color: white; padding: 15px 30px; text-decoration: none; border-radius: 5px; font-size: 18px;\">⚡ RESPOND NOW IN RETOOL</a>\n</div>",
+        "options": {}
+      },
+      "id":"[redacted-id]",
+      "name": "Notify Urgent Admin",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "[redacted-uuid]",
+      "credentials": {
+        "gmailOAuth2": {
+          "id":"[redacted-id]",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $node['Smart Customer Matcher'].json.confidence }}",
+              "operator": {
+                "type": "number",
+                "operation": "lt",
+                "value": 70
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id":"[redacted-id]",
+      "name": "New Customer?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -1408,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id":"[redacted-id]",
+              "name": "customer_id",
+              "value": "={{ 'CUST-' + Date.now() + '-EMAIL' }}",
+              "type": "string"
+            },
+            {
+              "id":"[redacted-id]",
+              "name": "customer_name",
+              "value": "={{ $node['Extract Email Data'].json.from.split('<')[0].trim() || 'New Customer' }}",
+              "type": "string"
+            },
+            {
+              "id":"[redacted-id]",
+              "name": "customer_email",
+              "value": "={{ $node['Extract Email Data'].json.fromEmail }}",
+              "type": "string"
+            },
+            {
+              "id":"[redacted-id]",
+              "name": "current_status",
+              "value": "New Inquiry via Email",
+              "type": "string"
+            },
+            {
+              "id": "org_id",
+              "name": "org_id",
+              "value": "le-glam-team",
+              "type": "string"
+            },
+            {
+              "id":"[redacted-id]",
+              "name": "customer_notes",
+              "value": "={{ $node['Extract Email Data'].json.body }}",
+              "type": "string"
+            },
+            {
+              "id":"[redacted-id]",
+              "name": "created_at",
+              "value": "={{ $now }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id":"[redacted-id]",
+      "name": "Prepare New Customer",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -1200,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "tableId": "customer_requests",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "customer_id",
+              "fieldValue": "={{ $json.customer_id }}"
+            },
+            {
+              "fieldId": "org_id",
+              "fieldValue": "={{ $json.org_id }}"
+            },
+            {
+              "fieldId": "customer_name",
+              "fieldValue": "={{ $json.customer_name }}"
+            },
+            {
+              "fieldId": "customer_email",
+              "fieldValue": "={{ $json.customer_email }}"
+            },
+            {
+              "fieldId": "current_status",
+              "fieldValue": "={{ $json.current_status }}"
+            },
+            {
+              "fieldId": "customer_notes",
+              "fieldValue": "={{ $json.customer_notes }}"
+            },
+            {
+              "fieldId": "created_at",
+              "fieldValue": "={{ $json.created_at }}"
+            },
+            {
+              "fieldId": "payment_status",
+              "fieldValue": "unpaid"
+            }
+          ]
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Create New Customer",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -1008,
+        304
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id":"[redacted-id]",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "redacted@redacted-handle.com",
+        "subject": "=🆕 New Customer Inquiry - {{ $json.customer_name }}",
+        "message": "=<h2>New Customer Inquiry via Email</h2>\n<div style=\"background: #d1ecf1; padding: 15px; border-radius: 5px; border-left: 4px solid #0c5460;\">\n  <p><strong>Name:</strong> {{ $json.customer_name }}</p>\n  <p><strong>Email:</strong> {{ $json.customer_email }}</p>\n  <p><strong>Customer ID:</strong> {{ $json.customer_id }}</p>\n</div>\n\n<h3>Message:</h3>\n<div style=\"background: #f5f5f5; padding: 15px; border-radius: 5px;\">\n  <p><strong>Subject:</strong> {{ $node['Extract Email Data'].json.subject }}</p>\n  <p>{{ $node['Extract Email Data'].json.body }}</p>\n</div>\n\n<div style=\"margin-top: 20px;\">\n  <a href=\"https://gostriveforward.retool.com/apps/[redacted-uuid]/LE%20Glam%20Customer%20Management/page1\" style=\"background: #28a745; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;\">Process in Retool</a>\n</div>",
+        "options": {}
+      },
+      "id":"[redacted-id]",
+      "name": "Notify New Customer",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        -800,
+        304
+      ],
+      "webhookId": "[redacted-uuid]",
+      "credentials": {
+        "gmailOAuth2": {
+          "id":"[redacted-id]",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "redacted@redacted-handle.com",
+        "subject": "=⚠️ Manual Review Required - {{ $node['Extract Email Data'].json.fromEmail }}",
+        "message": "=<h2>Customer Match Requires Manual Review</h2>\n<div style=\"background: #fff3cd; padding: 15px; border-radius: 5px; border-left: 4px solid #856404;\">\n  <p><strong>Confidence Score:</strong> {{ $node['Smart Customer Matcher'].json.confidence }}%</p>\n  <p><strong>Match Type:</strong> {{ $node['Smart Customer Matcher'].json.matchType }}</p>\n  <p><strong>From:</strong> {{ $node['Extract Email Data'].json.fromEmail }}</p>\n</div>\n\n<h3>Email Details:</h3>\n<div style=\"background: #f5f5f5; padding: 15px; border-radius: 5px;\">\n  <p><strong>Subject:</strong> {{ $node['Extract Email Data'].json.subject }}</p>\n  <p>{{ $node['Extract Email Data'].json.body }}</p>\n</div>\n\n<p>Please review and manually assign to the correct customer.</p>\n\n<a href=\"https://gostriveforward.retool.com/apps/[redacted-uuid]/LE%20Glam%20Customer%20Management/page1\" style=\"background: #ffc107; color: #212529; padding: 10px 20px; text-decoration: none; border-radius: 5px;\">Review in Retool</a>",
+        "options": {}
+      },
+      "id":"[redacted-id]",
+      "name": "Request Manual Review",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        -1200,
+        464
+      ],
+      "webhookId": "[redacted-uuid]",
+      "credentials": {
+        "gmailOAuth2": {
+          "id":"[redacted-id]",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "tableId": "email_logs",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "customer_id",
+              "fieldValue": "={{ $node['Smart Customer Matcher'].json.customerId }}"
+            },
+            {
+              "fieldId": "org_id",
+              "fieldValue": "le-glam-team"
+            },
+            {
+              "fieldId": "direction",
+              "fieldValue": "inbound"
+            },
+            {
+              "fieldId": "email_from",
+              "fieldValue": "={{ $node['Extract Email Data'].json.fromEmail }}"
+            },
+            {
+              "fieldId": "email_to",
+              "fieldValue": "redacted@redacted-handle.com"
+            },
+            {
+              "fieldId": "email_subject",
+              "fieldValue": "={{ $node['Extract Email Data'].json.subject }}"
+            },
+            {
+              "fieldId": "email_body",
+              "fieldValue": "={{ $node['Extract Email Data'].json.body }}"
+            },
+            {
+              "fieldId": "thread_id",
+              "fieldValue": "={{ $node['Extract Email Data'].json.threadId }}"
+            },
+            {
+              "fieldId": "message_id",
+              "fieldValue": "={{ $node['Extract Email Data'].json.messageId }}"
+            },
+            {
+              "fieldId": "in_reply_to",
+              "fieldValue": "={{ $node['Extract Email Data'].json.inReplyTo }}"
+            },
+            {
+              "fieldId": "timestamp",
+              "fieldValue": "={{ $now }}"
+            },
+            {
+              "fieldId": "sequence_number",
+              "fieldValue": "={{ 2 }}"
+            },
+            {
+              "fieldId": "client_message_id",
+              "fieldValue": "={{ $node['Extract Email Data'].json.uniqueId }}"
+            },
+            {
+              "fieldId": "sent_by",
+              "fieldValue": "customer"
+            }
+          ]
+        }
+      },
+      "id":"[redacted-id]",
+      "name": "Log Email to DB",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -1264,
+        16
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id":"[redacted-id]",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "joinMode": "enrichInput1",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        -1744,
+        176
+      ],
+      "id":"[redacted-id]",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id":"[redacted-id]",
+              "name": "thread",
+              "value": "={{$json}}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -1952,
+        112
+      ],
+      "id":"[redacted-id]",
+      "name": "Set Thread"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id":"[redacted-id]",
+              "name": "customer",
+              "value": "={{$json}}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -1952,
+        272
+      ],
+      "id":"[redacted-id]",
+      "name": "Set Customer"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Gmail Reply Monitor": {
+      "main": [
+        [
+          {
+            "node": "Extract Email Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Email Data": {
+      "main": [
+        [
+          {
+            "node": "Find Thread in DB",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Find Customer by Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Thread in DB": {
+      "main": [
+        [
+          {
+            "node": "Set Thread",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Customer by Email": {
+      "main": [
+        [
+          {
+            "node": "Set Customer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Smart Customer Matcher": {
+      "main": [
+        [
+          {
+            "node": "High Confidence?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "New Customer?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "High Confidence?": {
+      "main": [
+        [
+          {
+            "node": "Log Email to DB",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Request Manual Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Conversation History": {
+      "main": [
+        [
+          {
+            "node": "AI Agent Analysis & Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent Analysis & Draft": {
+      "main": [
+        [
+          {
+            "node": "Update Customer Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Customer Status": {
+      "main": [
+        [
+          {
+            "node": "Notify Admin - Customer Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify Admin - Customer Reply": {
+      "main": [
+        [
+          {
+            "node": "Needs Urgent Admin?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Urgent Admin?": {
+      "main": [
+        [
+          {
+            "node": "Notify Urgent Admin",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "New Customer?": {
+      "main": [
+        [
+          {
+            "node": "Prepare New Customer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare New Customer": {
+      "main": [
+        [
+          {
+            "node": "Create New Customer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create New Customer": {
+      "main": [
+        [
+          {
+            "node": "Notify New Customer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Email to DB": {
+      "main": [
+        [
+          {
+            "node": "Get Conversation History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Smart Customer Matcher",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Thread": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Customer": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "[redacted-uuid]",
+  "meta": {
+    "instanceId": "[redacted-token]"
+  },
+  "id":"[redacted-id]",
+  "tags": [
+    {
+      "createdAt": "2025-09-02T23:55:48.013Z",
+      "updatedAt": "2025-09-02T23:55:48.013Z",
+      "id":"[redacted-id]",
+      "name": "production"
+    }
+  ]
+}
